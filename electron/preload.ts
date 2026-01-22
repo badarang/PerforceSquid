@@ -1,0 +1,47 @@
+import { contextBridge, ipcRenderer } from 'electron'
+
+const p4Api = {
+  getClients: () => ipcRenderer.invoke('p4:clients'),
+  setClient: (clientName: string) => ipcRenderer.invoke('p4:setClient', clientName),
+  getClient: () => ipcRenderer.invoke('p4:getClient'),
+  getInfo: () => ipcRenderer.invoke('p4:info'),
+  getOpenedFiles: () => ipcRenderer.invoke('p4:opened'),
+  getDiff: (filePath: string) => ipcRenderer.invoke('p4:diff', filePath),
+  getChangelists: () => ipcRenderer.invoke('p4:changelists'),
+  submit: (changelist: number, description: string) =>
+    ipcRenderer.invoke('p4:submit', changelist, description),
+  sync: (filePath?: string) => ipcRenderer.invoke('p4:sync', filePath),
+  revert: (files: string[]) => ipcRenderer.invoke('p4:revert', files),
+  revertUnchanged: () => ipcRenderer.invoke('p4:revertUnchanged'),
+  shelve: (changelist: number) => ipcRenderer.invoke('p4:shelve', changelist),
+  unshelve: (changelist: number) => ipcRenderer.invoke('p4:unshelve', changelist),
+  getSubmittedChanges: (depotPath: string, maxChanges?: number) =>
+    ipcRenderer.invoke('p4:submittedChanges', depotPath, maxChanges),
+  describeChangelist: (changelist: number) =>
+    ipcRenderer.invoke('p4:describeChangelist', changelist),
+  getClientStream: () => ipcRenderer.invoke('p4:getClientStream'),
+  reopenFiles: (files: string[], changelist: number | 'default') =>
+    ipcRenderer.invoke('p4:reopenFiles', files, changelist),
+  createChangelist: (description: string) =>
+    ipcRenderer.invoke('p4:createChangelist', description),
+  deleteChangelist: (changelist: number) =>
+    ipcRenderer.invoke('p4:deleteChangelist', changelist),
+  revertAndDeleteChangelist: (changelist: number) =>
+    ipcRenderer.invoke('p4:revertAndDeleteChangelist', changelist),
+  getOrCreateJunkChangelist: () =>
+    ipcRenderer.invoke('p4:getOrCreateJunkChangelist'),
+  annotate: (filePath: string) =>
+    ipcRenderer.invoke('p4:annotate', filePath),
+}
+
+const settingsApi = {
+  getAutoLaunch: () => ipcRenderer.invoke('settings:getAutoLaunch'),
+  setAutoLaunch: (enabled: boolean) => ipcRenderer.invoke('settings:setAutoLaunch', enabled),
+}
+
+contextBridge.exposeInMainWorld('p4', p4Api)
+contextBridge.exposeInMainWorld('settings', settingsApi)
+
+// Type declaration for renderer
+export type P4Api = typeof p4Api
+export type SettingsApi = typeof settingsApi
