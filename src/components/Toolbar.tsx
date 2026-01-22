@@ -120,6 +120,15 @@ export function Toolbar() {
     {loadingMessage && <LoadingOverlay message={loadingMessage} />}
     <div className="h-12 bg-p4-darker border-b border-p4-border flex items-center px-4 gap-2">
       <button
+        onClick={handleRevertUnchanged}
+        disabled={isReverting}
+        className="px-3 py-1.5 text-sm bg-gray-700 hover:bg-gray-600 rounded transition-colors disabled:opacity-50"
+        title="Revert files with no actual changes (p4 revert -a)"
+      >
+        {isReverting ? '...' : '↩'} Revert Unchanged
+      </button>
+
+      <button
         onClick={() => refresh()}
         disabled={isLoading}
         className="px-3 py-1.5 text-sm bg-gray-700 hover:bg-gray-600 rounded transition-colors disabled:opacity-50"
@@ -135,15 +144,6 @@ export function Toolbar() {
         title="Sync (Get Latest)"
       >
         {isSyncing ? '...' : '↓'} Sync
-      </button>
-
-      <button
-        onClick={handleRevertUnchanged}
-        disabled={isReverting}
-        className="px-3 py-1.5 text-sm bg-gray-700 hover:bg-gray-600 rounded transition-colors disabled:opacity-50"
-        title="Revert files with no actual changes (p4 revert -a)"
-      >
-        {isReverting ? '...' : '↩'} Revert Unchanged
       </button>
 
       <div className="flex-1" />
