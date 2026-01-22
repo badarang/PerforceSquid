@@ -1,6 +1,6 @@
 import { exec, spawn } from 'child_process'
 import { promisify } from 'util'
-import type { P4Info, P4File, P4Changelist, P4DiffResult } from './types'
+import type { P4Info, P4File, P4Changelist, P4DiffResult, P4Stream, P4Workspace, P4Depot, StreamRelation, StreamType } from './types'
 
 const execAsync = promisify(exec)
 
@@ -921,6 +921,292 @@ export class P4Service {
         lines: [],
         message: error.message
       }
+    }
+  }
+
+  // ============================================
+  // Stream Graph Related Methods
+  // ============================================
+
+  // Get all depots
+  async getDepots(): Promise<P4Depot[]> {
+    try {
+      const output = await this.runCommand(['depots'])
+      const depots: P4Depot[] = []
+      const lines = output.trim().split('\n')
+
+      for (const line of lines) {
+        // Format: Depot name date type map 'description'
+        const match = line.match(/^Depot\s+(\S+)\s+\S+\s+(\S+)\s+(\S+)\s+'(.*)'/)
+        if (match) {
+          const [, depot, type, map, description] = match
+          depots.push({ depot, type, map, description })
+        }
+      }
+
+      return depots
+    } catch (error) {
+      return []
+    }
+  }
+
+  // Get all streams in a depot
+  async getStreams(depot?: string): Promise<P4Stream[]> {
+    try {
+      const depotPattern = depot ? `//${depot}/...` : '//...'
+      const output = await this.runCommand(['streams', depotPattern])
+
+      if (!output.trim()) {
+        return []
+      }
+
+      const streams: P4Stream[] = []
+      const lines = output.trim().split('\n')
+
+      for (const line of lines) {
+        // Format: Stream //depot/stream date 'owner' type parent 'description'
+        // Example: Stream //depot/main 2024/01/01 'admin' mainline none 'Main development stream'
+        const match = line.match(/^Stream\s+(\S+)\s+\S+\s+'([^']*)'?\s+(\S+)\s+(\S+)\s+'(.*)'$/)
+        if (match) {
+          const [, streamPath, owner, type, parent, description] = match
+          const streamName = streamPath.split('/').pop() || streamPath
+          const depotName = streamPath.split('/')[2] || ''
+
+          streams.push({
+            stream: streamPath,
+            name: streamName,
+            parent: parent === 'none' ? 'none' : parent,
+            type: type as StreamType,
+            owner,
+            description,
+            options: '',
+            depotName
+          })
+        }
+      }
+
+      return streams
+    } catch (error) {
+      return []
+    }
+  }
+
+  // Get detailed stream spec
+  async getStreamSpec(streamPath: string): Promise<P4Stream | null> {
+    try {
+      const output = await this.runCommand(['stream', '-o', streamPath])
+
+      const stream: Partial<P4Stream> = {
+        stream: streamPath,
+        name: streamPath.split('/').pop() || streamPath,
+        depotName: streamPath.split('/')[2] || ''
+      }
+
+      const lines = output.split('\n')
+      for (const line of lines) {
+        if (line.startsWith('Parent:')) {
+          stream.parent = line.replace('Parent:', '').trim() || 'none'
+        } else if (line.startsWith('Type:')) {
+          stream.type = line.replace('Type:', '').trim() as StreamType
+        } else if (line.startsWith('Owner:')) {
+          stream.owner = line.replace('Owner:', '').trim()
+        } else if (line.startsWith('Description:')) {
+          stream.description = line.replace('Description:', '').trim()
+        } else if (line.startsWith('Options:')) {
+          stream.options = line.replace('Options:', '').trim()
+        }
+      }
+
+      return stream as P4Stream
+    } catch (error) {
+      return null
+    }
+  }
+
+  // Get all workspaces (clients)
+  async getAllWorkspaces(): Promise<P4Workspace[]> {
+    try {
+      const output = await this.runCommand(['clients'])
+      return this.parseWorkspacesOutput(output)
+    } catch (error) {
+      return []
+    }
+  }
+
+  // Get workspaces for a specific stream
+  async getWorkspacesByStream(streamPath: string): Promise<P4Workspace[]> {
+    try {
+      const output = await this.runCommand(['clients', '-S', streamPath])
+      return this.parseWorkspacesOutput(output)
+    } catch (error) {
+      return []
+    }
+  }
+
+  private parseWorkspacesOutput(output: string): P4Workspace[] {
+    const workspaces: P4Workspace[] = []
+    const lines = output.trim().split('\n')
+
+    for (const line of lines) {
+      // Format: Client name date root path 'description'
+      const match = line.match(/^Client\s+(\S+)\s+(\S+)\s+root\s+(\S+)\s+'(.*)'/)
+      if (match) {
+        const [, client, update, root, description] = match
+        workspaces.push({
+          client,
+          owner: '',  // Will be filled by getWorkspaceDetails if needed
+          stream: '',
+          root,
+          host: '',
+          description,
+          access: '',
+          update
+        })
+      }
+    }
+
+    return workspaces
+  }
+
+  // Get detailed workspace info
+  async getWorkspaceDetails(clientName: string): Promise<P4Workspace | null> {
+    try {
+      const output = await this.runCommand(['client', '-o', clientName])
+
+      const workspace: Partial<P4Workspace> = { client: clientName }
+      const lines = output.split('\n')
+
+      for (const line of lines) {
+        if (line.startsWith('Owner:')) {
+          workspace.owner = line.replace('Owner:', '').trim()
+        } else if (line.startsWith('Root:')) {
+          workspace.root = line.replace('Root:', '').trim()
+        } else if (line.startsWith('Host:')) {
+          workspace.host = line.replace('Host:', '').trim()
+        } else if (line.startsWith('Stream:')) {
+          workspace.stream = line.replace('Stream:', '').trim()
+        } else if (line.startsWith('Description:')) {
+          workspace.description = line.replace('Description:', '').trim()
+        } else if (line.startsWith('Access:')) {
+          workspace.access = line.replace('Access:', '').trim()
+        } else if (line.startsWith('Update:')) {
+          workspace.update = line.replace('Update:', '').trim()
+        }
+      }
+
+      return workspace as P4Workspace
+    } catch (error) {
+      return null
+    }
+  }
+
+  // Get pending changes between streams (for merge/copy visualization)
+  async getInterchanges(fromStream: string, toStream: string): Promise<StreamRelation> {
+    try {
+      // p4 interchanges -S shows changes that need to be merged
+      const output = await this.runCommand(['interchanges', '-S', fromStream, toStream])
+
+      const lines = output.trim().split('\n').filter(l => l.trim() && l.startsWith('Change'))
+      return {
+        fromStream,
+        toStream,
+        direction: 'merge',
+        pendingChanges: lines.length
+      }
+    } catch (error: any) {
+      // No interchanges or error
+      return {
+        fromStream,
+        toStream,
+        direction: 'merge',
+        pendingChanges: 0
+      }
+    }
+  }
+
+  // Get copy-up changes (from child to parent)
+  async getCopyChanges(fromStream: string, toStream: string): Promise<StreamRelation> {
+    try {
+      // -r flag reverses direction for copy
+      const output = await this.runCommand(['interchanges', '-S', '-r', fromStream, toStream])
+
+      const lines = output.trim().split('\n').filter(l => l.trim() && l.startsWith('Change'))
+      return {
+        fromStream,
+        toStream,
+        direction: 'copy',
+        pendingChanges: lines.length
+      }
+    } catch (error: any) {
+      return {
+        fromStream,
+        toStream,
+        direction: 'copy',
+        pendingChanges: 0
+      }
+    }
+  }
+
+  // Get all stream relations for a depot
+  async getStreamRelations(streams: P4Stream[]): Promise<StreamRelation[]> {
+    const relations: StreamRelation[] = []
+
+    for (const stream of streams) {
+      if (stream.parent && stream.parent !== 'none') {
+        // Check merge down (parent -> child)
+        const mergeRelation = await this.getInterchanges(stream.parent, stream.stream)
+        if (mergeRelation.pendingChanges > 0) {
+          relations.push(mergeRelation)
+        }
+
+        // Check copy up (child -> parent)
+        const copyRelation = await this.getCopyChanges(stream.stream, stream.parent)
+        if (copyRelation.pendingChanges > 0) {
+          relations.push(copyRelation)
+        }
+      }
+    }
+
+    return relations
+  }
+
+  // Get complete stream graph data for a depot
+  async getStreamGraphData(depot: string): Promise<{
+    streams: P4Stream[]
+    workspaces: P4Workspace[]
+    relations: StreamRelation[]
+  }> {
+    try {
+      // Get all streams in depot
+      const streams = await this.getStreams(depot)
+
+      // Get workspaces with stream info
+      const workspacesMap = new Map<string, P4Workspace[]>()
+
+      for (const stream of streams) {
+        const wsForStream = await this.getWorkspacesByStream(stream.stream)
+
+        // Get detailed info for each workspace
+        const detailedWorkspaces: P4Workspace[] = []
+        for (const ws of wsForStream) {
+          const details = await this.getWorkspaceDetails(ws.client)
+          if (details) {
+            detailedWorkspaces.push(details)
+          }
+        }
+
+        workspacesMap.set(stream.stream, detailedWorkspaces)
+      }
+
+      // Flatten workspaces
+      const allWorkspaces = Array.from(workspacesMap.values()).flat()
+
+      // Get stream relations (pending merges/copies)
+      const relations = await this.getStreamRelations(streams)
+
+      return { streams, workspaces: allWorkspaces, relations }
+    } catch (error) {
+      return { streams: [], workspaces: [], relations: [] }
     }
   }
 }

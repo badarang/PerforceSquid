@@ -1,4 +1,4 @@
-import type { P4Info, P4File, P4Changelist, P4DiffResult } from '../electron/p4/types'
+import type { P4Info, P4File, P4Changelist, P4DiffResult, P4Stream, P4Workspace, P4Depot, StreamRelation, StreamGraphData } from '../electron/p4/types'
 
 interface P4Client {
   name: string
@@ -43,6 +43,15 @@ interface P4Api {
     }>
     message?: string
   }>
+  // Stream Graph APIs
+  getDepots: () => Promise<P4Depot[]>
+  getStreams: (depot?: string) => Promise<P4Stream[]>
+  getStreamSpec: (streamPath: string) => Promise<P4Stream | null>
+  getAllWorkspaces: () => Promise<P4Workspace[]>
+  getWorkspacesByStream: (streamPath: string) => Promise<P4Workspace[]>
+  getWorkspaceDetails: (clientName: string) => Promise<P4Workspace | null>
+  getStreamGraphData: (depot: string) => Promise<StreamGraphData>
+  getInterchanges: (fromStream: string, toStream: string) => Promise<StreamRelation>
 }
 
 interface SettingsApi {

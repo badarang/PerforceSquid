@@ -32,6 +32,15 @@ const p4Api = {
     ipcRenderer.invoke('p4:getOrCreateJunkChangelist'),
   annotate: (filePath: string) =>
     ipcRenderer.invoke('p4:annotate', filePath),
+  // Stream Graph APIs
+  getDepots: () => ipcRenderer.invoke('p4:getDepots'),
+  getStreams: (depot?: string) => ipcRenderer.invoke('p4:getStreams', depot),
+  getStreamSpec: (streamPath: string) => ipcRenderer.invoke('p4:getStreamSpec', streamPath),
+  getAllWorkspaces: () => ipcRenderer.invoke('p4:getAllWorkspaces'),
+  getWorkspacesByStream: (streamPath: string) => ipcRenderer.invoke('p4:getWorkspacesByStream', streamPath),
+  getWorkspaceDetails: (clientName: string) => ipcRenderer.invoke('p4:getWorkspaceDetails', clientName),
+  getStreamGraphData: (depot: string) => ipcRenderer.invoke('p4:getStreamGraphData', depot),
+  getInterchanges: (fromStream: string, toStream: string) => ipcRenderer.invoke('p4:getInterchanges', fromStream, toStream),
 }
 
 const settingsApi = {

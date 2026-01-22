@@ -26,15 +26,23 @@
       "dist-electron/**/*"
     ],
     "win": {
-      "target": ["nsis", "portable"],
+      "target": [
+        "nsis",
+        "portable"
+      ],
       "icon": "build/icon.png"
     },
     "mac": {
-      "target": ["dmg"],
+      "target": [
+        "dmg"
+      ],
       "icon": "build/icon.png"
     },
     "linux": {
-      "target": ["AppImage", "deb"],
+      "target": [
+        "AppImage",
+        "deb"
+      ],
       "icon": "build/icon.png"
     },
     "nsis": {
@@ -43,17 +51,19 @@
     }
   },
   "dependencies": {
+    "diff": "^5.2.0",
+    "elkjs": "^0.11.0",
     "react": "^18.2.0",
-    "react-dom": "^18.2.0",
-    "zustand": "^4.5.0",
     "react-diff-view": "^3.2.0",
+    "react-dom": "^18.2.0",
+    "reactflow": "^11.11.4",
     "unidiff": "^1.0.4",
-    "diff": "^5.2.0"
+    "zustand": "^4.5.0"
   },
   "devDependencies": {
+    "@types/diff": "^5.2.0",
     "@types/react": "^18.2.0",
     "@types/react-dom": "^18.2.0",
-    "@types/diff": "^5.2.0",
     "@vitejs/plugin-react": "^4.2.0",
     "autoprefixer": "^10.4.16",
     "concurrently": "^8.2.0",

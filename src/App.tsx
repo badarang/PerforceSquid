@@ -180,7 +180,7 @@ function App() {
 
       {/* Main Content */}
       <div className="flex-1 flex overflow-hidden">
-        {activeTab === 'changes' ? (
+        {activeTab === 'changes' && (
           <>
             {/* Sidebar - Changelists */}
             <div className="w-56 border-r border-p4-border flex-shrink-0">
@@ -200,10 +200,12 @@ function App() {
               <DiffViewer />
             </div>
           </>
-        ) : (
+        )}
+
+        {activeTab === 'history' && (
           <>
-            {/* History List */}
-            <div className="w-80 border-r border-p4-border flex-shrink-0">
+            {/* History List with Graph */}
+            <div className="w-96 border-r border-p4-border flex-shrink-0">
               <History
                 depotPath={depotPath}
                 onChangelistSelect={setSelectedHistoryChangelist}

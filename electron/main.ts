@@ -141,6 +141,39 @@ ipcMain.handle('p4:annotate', async (_, filePath: string) => {
   return p4Service.annotate(filePath)
 })
 
+// Stream Graph IPC Handlers
+ipcMain.handle('p4:getDepots', async () => {
+  return p4Service.getDepots()
+})
+
+ipcMain.handle('p4:getStreams', async (_, depot?: string) => {
+  return p4Service.getStreams(depot)
+})
+
+ipcMain.handle('p4:getStreamSpec', async (_, streamPath: string) => {
+  return p4Service.getStreamSpec(streamPath)
+})
+
+ipcMain.handle('p4:getAllWorkspaces', async () => {
+  return p4Service.getAllWorkspaces()
+})
+
+ipcMain.handle('p4:getWorkspacesByStream', async (_, streamPath: string) => {
+  return p4Service.getWorkspacesByStream(streamPath)
+})
+
+ipcMain.handle('p4:getWorkspaceDetails', async (_, clientName: string) => {
+  return p4Service.getWorkspaceDetails(clientName)
+})
+
+ipcMain.handle('p4:getStreamGraphData', async (_, depot: string) => {
+  return p4Service.getStreamGraphData(depot)
+})
+
+ipcMain.handle('p4:getInterchanges', async (_, fromStream: string, toStream: string) => {
+  return p4Service.getInterchanges(fromStream, toStream)
+})
+
 // Settings IPC Handlers
 ipcMain.handle('settings:getAutoLaunch', () => {
   const settings = app.getLoginItemSettings()

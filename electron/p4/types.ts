@@ -30,3 +30,49 @@ export interface P4DiffResult {
   newContent: string
   hunks: string
 }
+
+// Stream Types
+export type StreamType = 'mainline' | 'development' | 'release' | 'virtual' | 'task'
+
+export interface P4Stream {
+  stream: string           // //depot/main
+  name: string             // main
+  parent: string           // //depot/parent or 'none'
+  type: StreamType
+  owner: string
+  description: string
+  options: string
+  baseParent?: string
+  depotName?: string       // extracted depot name
+}
+
+export interface P4Workspace {
+  client: string           // workspace name
+  owner: string            // owner user
+  stream: string           // connected stream path
+  root: string             // client root path
+  host: string             // hostname
+  description: string
+  access: string           // last access time
+  update: string           // last update time
+}
+
+export interface P4Depot {
+  depot: string
+  type: string             // stream, local, remote, etc.
+  map: string
+  description: string
+}
+
+export interface StreamRelation {
+  fromStream: string
+  toStream: string
+  direction: 'copy' | 'merge'
+  pendingChanges: number
+}
+
+export interface StreamGraphData {
+  streams: P4Stream[]
+  workspaces: P4Workspace[]
+  relations: StreamRelation[]
+}
