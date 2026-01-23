@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useP4Store } from '../stores/p4Store'
 import { useToastContext } from '../App'
 import { Settings } from './Settings'
+import { StreamSelector } from './StreamSelector'
 
 // Loading overlay component
 function LoadingOverlay({ message }: { message: string }) {
@@ -17,7 +18,12 @@ function LoadingOverlay({ message }: { message: string }) {
   )
 }
 
-export function Toolbar() {
+interface ToolbarProps {
+  currentStream: string | null
+  onStreamChange: (streamPath: string) => void
+}
+
+export function Toolbar({ currentStream, onStreamChange }: ToolbarProps) {
   const { refresh, isLoading } = useP4Store()
   const toast = useToastContext()
   const [isSyncing, setIsSyncing] = useState(false)
@@ -145,6 +151,14 @@ export function Toolbar() {
       >
         {isSyncing ? '...' : '↓'} Sync
       </button>
+
+      {/* Stream Selector */}
+      <div className="mx-2 border-l border-p4-border pl-4">
+        <StreamSelector
+          currentStream={currentStream}
+          onStreamChange={onStreamChange}
+        />
+      </div>
 
       <div className="flex-1" />
 

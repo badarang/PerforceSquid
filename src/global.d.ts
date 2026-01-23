@@ -8,6 +8,14 @@ interface P4Client {
 
 interface P4Api {
   getClients: () => Promise<P4Client[]>
+  createClient: (client: {
+    name: string
+    root: string
+    options: string
+    submitOptions: string
+    stream?: string
+    description?: string
+  }) => Promise<{ success: boolean; message: string }>
   setClient: (clientName: string) => Promise<{ success: boolean }>
   getClient: () => Promise<string | null>
   getInfo: () => Promise<P4Info>
@@ -27,6 +35,8 @@ interface P4Api {
     diff: string
   }>
   getClientStream: () => Promise<string | null>
+  switchStream: (streamPath: string) => Promise<{ success: boolean; message: string }>
+  getCurrentDepot: () => Promise<string | null>
   reopenFiles: (files: string[], changelist: number | 'default') => Promise<{ success: boolean; message: string }>
   createChangelist: (description: string) => Promise<{ success: boolean; changelistNumber: number; message: string }>
   deleteChangelist: (changelist: number) => Promise<{ success: boolean; message: string }>
@@ -59,10 +69,15 @@ interface SettingsApi {
   setAutoLaunch: (enabled: boolean) => Promise<{ success: boolean }>
 }
 
+interface DialogApi {
+  openDirectory: () => Promise<string | null>
+}
+
 declare global {
   interface Window {
     p4: P4Api
     settings: SettingsApi
+    dialog: DialogApi
   }
 }
 

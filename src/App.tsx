@@ -1,4 +1,5 @@
 import { useEffect, useState, createContext, useContext } from 'react'
+import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels'
 import { useP4Store } from './stores/p4Store'
 import { Sidebar } from './components/Sidebar'
 import { FileList } from './components/FileList'
@@ -76,6 +77,13 @@ function App() {
     setSelectedHistoryChangelist(null)
   }
 
+  const handleStreamChange = async (newStreamPath: string) => {
+    setDepotPath(newStreamPath)
+    setSelectedHistoryChangelist(null)
+    // Refresh to load new stream's data
+    await refresh()
+  }
+
   if (checkingClient) {
     return (
       <div className="h-screen bg-p4-dark flex items-center justify-center">
@@ -139,45 +147,57 @@ function App() {
     <ToastContext.Provider value={{ showToast }}>
       <div className="h-screen bg-p4-dark flex flex-col">
         {/* Toolbar */}
-        <Toolbar />
+        <Toolbar
+          currentStream={depotPath}
+          onStreamChange={handleStreamChange}
+        />
 
         {/* Main Content - 3 Panel Layout */}
-        <div className="flex-1 flex overflow-hidden">
+        <PanelGroup direction="horizontal" autoSaveId="main-layout" className="flex-1 flex overflow-hidden">
           {/* Left Panel: My Changes (Pending Changelists) */}
-          <div className="w-48 border-r border-p4-border flex-shrink-0 flex flex-col">
+          <Panel defaultSize={15} minSize={10} className="border-r border-p4-border flex-shrink-0 flex flex-col">
             <Sidebar onSelectChangelist={() => setSelectedHistoryChangelist(null)} />
-          </div>
+          </Panel>
+          <PanelResizeHandle className='resize-handle-outer'>
+            <div className='resize-handle-inner' />
+          </PanelResizeHandle>
 
           {/* Middle Panel: History + Graph */}
-          <div className="w-80 border-r border-p4-border flex-shrink-0">
+          <Panel defaultSize={25} minSize={15} className="border-r border-p4-border flex-shrink-0">
             <CommitGraph
               depotPath={depotPath}
               onSelectChangelist={setSelectedHistoryChangelist}
               selectedChangelist={selectedHistoryChangelist}
             />
-          </div>
+          </Panel>
+          <PanelResizeHandle className='resize-handle-outer'>
+            <div className='resize-handle-inner' />
+          </PanelResizeHandle>
 
           {/* Right Panel: Detail View */}
-          <div className="flex-1 flex flex-col min-w-0">
+          <Panel defaultSize={60} minSize={30} className="flex-1 flex flex-col min-w-0">
             {selectedHistoryChangelist !== null ? (
               /* Show submitted changelist diff when history is selected */
               <ChangelistDiff changelist={selectedHistoryChangelist} />
             ) : selectedChangelist !== null ? (
               /* Show pending changelist details when My Changes is selected */
-              <>
-                {/* File List */}
-                <div className="h-48 border-b border-p4-border flex-shrink-0 overflow-hidden">
+              <PanelGroup direction="vertical" autoSaveId="details-layout">
+                <Panel defaultSize={40} minSize={20} className="border-b border-p4-border flex-shrink-0 overflow-hidden">
                   <FileList />
-                </div>
-                {/* Submit Panel */}
-                <div className="flex-shrink-0">
+                </Panel>
+                <PanelResizeHandle className='resize-handle-outer'>
+                    <div className='resize-handle-inner' />
+                </PanelResizeHandle>
+                <Panel collapsible={true} defaultSize={25} minSize={15} className="flex-shrink-0">
                   <SubmitPanel />
-                </div>
-                {/* Diff Viewer */}
-                <div className="flex-1 overflow-hidden">
+                </Panel>
+                <PanelResizeHandle className='resize-handle-outer'>
+                    <div className='resize-handle-inner' />
+                </PanelResizeHandle>
+                <Panel minSize={20} className="flex-1 overflow-hidden">
                   <DiffViewer />
-                </div>
-              </>
+                </Panel>
+              </PanelGroup>
             ) : (
               /* Empty state */
               <div className="flex-1 flex items-center justify-center text-gray-500">
@@ -192,8 +212,8 @@ function App() {
                 </div>
               </div>
             )}
-          </div>
-        </div>
+          </Panel>
+        </PanelGroup>
 
         {/* Status Bar */}
         <div className="h-6 bg-p4-blue text-white text-xs flex items-center px-3 gap-4">

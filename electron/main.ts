@@ -6,11 +6,14 @@ let mainWindow: BrowserWindow | null = null
 const p4Service = new P4Service()
 
 function createWindow() {
+  const isDev = process.env.VITE_DEV_SERVER_URL;
+  
   mainWindow = new BrowserWindow({
     width: 1280,
     height: 720,
     minWidth: 800,
     minHeight: 600,
+    icon: path.join(isDev ? process.cwd() : process.resourcesPath, 'build/icon.png'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -54,6 +57,10 @@ app.on('activate', () => {
 // IPC Handlers
 ipcMain.handle('p4:clients', async () => {
   return p4Service.getClients()
+})
+
+ipcMain.handle('p4:createClient', async (_, client) => {
+  return p4Service.createClient(client)
 })
 
 ipcMain.handle('p4:setClient', async (_, clientName: string) => {
@@ -115,6 +122,14 @@ ipcMain.handle('p4:describeChangelist', async (_, changelist: number) => {
 
 ipcMain.handle('p4:getClientStream', async () => {
   return p4Service.getClientStream()
+})
+
+ipcMain.handle('p4:switchStream', async (_, streamPath: string) => {
+  return p4Service.switchStream(streamPath)
+})
+
+ipcMain.handle('p4:getCurrentDepot', async () => {
+  return p4Service.getCurrentDepot()
 })
 
 ipcMain.handle('p4:reopenFiles', async (_, files: string[], changelist: number | 'default') => {
@@ -186,4 +201,17 @@ ipcMain.handle('settings:setAutoLaunch', (_, enabled: boolean) => {
     path: app.getPath('exe')
   })
   return { success: true }
+})
+
+// Dialog Handlers
+import { dialog } from 'electron'
+
+ipcMain.handle('dialog:openDirectory', async () => {
+  const result = await dialog.showOpenDialog(mainWindow!, {
+    properties: ['openDirectory']
+  })
+  if (result.canceled) {
+    return null
+  }
+  return result.filePaths[0]
 })

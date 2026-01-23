@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useMemo } from 'react'
+import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import { getUserColor, getUserInitials } from '../utils/userIcon'
 
 interface SubmittedChangelist {
@@ -6,6 +6,14 @@ interface SubmittedChangelist {
   description: string
   user: string
   date?: string
+  stream?: string  // Which stream this commit belongs to
+}
+
+interface StreamInfo {
+  stream: string
+  name: string
+  parent: string
+  type: string
 }
 
 interface CommitGraphProps {
@@ -15,58 +23,40 @@ interface CommitGraphProps {
 }
 
 // Graph constants
-const GRAPH_WIDTH = 80
+const GRAPH_WIDTH = 100
 const NODE_RADIUS = 5
-const ROW_HEIGHT = 60
-const LANE_WIDTH = 16
-const LANE_OFFSET = 20
+const ROW_HEIGHT = 56
+const LANE_WIDTH = 20
+const LANE_OFFSET = 24
 
-// Lane colors
-const LANE_COLORS = [
-  '#22c55e', // green - main
-  '#3b82f6', // blue - dev
-  '#a855f7', // purple - feature
-  '#eab308', // yellow - release
-  '#ef4444', // red - hotfix
-  '#06b6d4', // cyan
-  '#f97316', // orange
-]
-
-// Detect if a commit is a merge/integrate
-function isMergeCommit(description: string): { isMerge: boolean; fromBranch?: string } {
-  const lower = description.toLowerCase()
-
-  // Common merge patterns
-  const mergePatterns = [
-    /integrat(e|ed|ing)/i,
-    /merg(e|ed|ing)/i,
-    /copy from/i,
-    /branch from/i,
-    /pull from/i,
-  ]
-
-  const isMerge = mergePatterns.some(p => p.test(lower))
-
-  // Try to extract source branch
-  const branchMatch = description.match(/from\s+\/\/[^/]+\/([^\s/]+)/i) ||
-                     description.match(/from\s+([^\s]+)/i)
-
-  return {
-    isMerge,
-    fromBranch: branchMatch ? branchMatch[1] : undefined
-  }
+// Stream type colors
+const STREAM_COLORS: Record<string, string> = {
+  mainline: '#22c55e',   // green
+  main: '#22c55e',
+  development: '#3b82f6', // blue
+  dev: '#3b82f6',
+  release: '#a855f7',    // purple
+  feature: '#eab308',    // yellow
+  task: '#f97316',       // orange
+  hotfix: '#ef4444',     // red
+  virtual: '#06b6d4',    // cyan
+  default: '#6b7280',    // gray
 }
 
-// Stream color based on path
-function getStreamColor(path: string | null): string {
-  if (!path) return '#6b7280'
-  const lowerPath = path.toLowerCase()
-  if (lowerPath.includes('main') || lowerPath.includes('trunk')) return LANE_COLORS[0]
-  if (lowerPath.includes('dev') || lowerPath.includes('development')) return LANE_COLORS[1]
-  if (lowerPath.includes('release') || lowerPath.includes('rel')) return LANE_COLORS[3]
-  if (lowerPath.includes('feature')) return LANE_COLORS[2]
-  if (lowerPath.includes('hotfix') || lowerPath.includes('fix')) return LANE_COLORS[4]
-  return '#6b7280'
+function getStreamColor(streamType: string, streamName: string): string {
+  const type = streamType?.toLowerCase() || ''
+  const name = streamName?.toLowerCase() || ''
+
+  if (STREAM_COLORS[type]) return STREAM_COLORS[type]
+
+  // Infer from name
+  if (name.includes('main') || name.includes('trunk')) return STREAM_COLORS.mainline
+  if (name.includes('dev')) return STREAM_COLORS.development
+  if (name.includes('release') || name.includes('rel')) return STREAM_COLORS.release
+  if (name.includes('feature') || name.includes('feat')) return STREAM_COLORS.feature
+  if (name.includes('hotfix') || name.includes('fix')) return STREAM_COLORS.hotfix
+
+  return STREAM_COLORS.default
 }
 
 function formatRelativeDate(dateStr: string | undefined): string {
@@ -91,92 +81,297 @@ function formatRelativeDate(dateStr: string | undefined): string {
   return `${Math.floor(diffDays / 365)}y ago`
 }
 
-interface CommitNode {
-  index: number
-  lane: number
-  isMerge: boolean
-  mergeFromLane?: number
-  color: string
+function parseDate(dateStr: string | undefined): number {
+  if (!dateStr) return 0
+  const parts = dateStr.split(' ')
+  const datePart = parts[0]
+  const timePart = parts[1] || '00:00:00'
+  const [year, month, day] = datePart.split('/')
+  const [hour, min, sec] = timePart.split(':')
+  return new Date(
+    parseInt(year), parseInt(month) - 1, parseInt(day),
+    parseInt(hour) || 0, parseInt(min) || 0, parseInt(sec) || 0
+  ).getTime()
 }
 
-// Calculate lane assignments for commits
-function calculateLanes(changelists: SubmittedChangelist[], mainColor: string): CommitNode[] {
-  const nodes: CommitNode[] = []
-  let activeMergeLane = -1
-  let mergeLaneEndIndex = -1
+interface GraphNode {
+  commit: SubmittedChangelist
+  lane: number
+  color: string
+  streamName: string
+  // Connection info
+  connectToNext: boolean
+  connectToPrev: boolean
+  // Lane change (for curved connections)
+  prevLane?: number
+  nextLane?: number
+}
 
-  for (let i = 0; i < changelists.length; i++) {
-    const cl = changelists[i]
-    const { isMerge } = isMergeCommit(cl.description)
+interface LaneInfo {
+  stream: string
+  color: string
+  name: string
+  active: boolean
+}
 
-    if (isMerge) {
-      // Merge commit - place on main lane but show incoming merge
-      const mergeFromLane = 1 // Show merge coming from lane 1
+// Author colors for virtual lanes
+const AUTHOR_COLORS = [
+  '#22c55e', // green
+  '#3b82f6', // blue
+  '#a855f7', // purple
+  '#eab308', // yellow
+  '#ef4444', // red
+  '#06b6d4', // cyan
+  '#f97316', // orange
+  '#ec4899', // pink
+  '#84cc16', // lime
+  '#14b8a6', // teal
+]
 
-      // Start a merge lane that will show for a few commits
-      if (activeMergeLane === -1) {
-        activeMergeLane = 1
-        mergeLaneEndIndex = Math.min(i + 3, changelists.length - 1)
-      }
+function getAuthorColor(authorIndex: number): string {
+  return AUTHOR_COLORS[authorIndex % AUTHOR_COLORS.length]
+}
 
-      nodes.push({
-        index: i,
-        lane: 0,
-        isMerge: true,
-        mergeFromLane,
-        color: mainColor
-      })
-    } else {
-      nodes.push({
-        index: i,
-        lane: 0,
-        isMerge: false,
-        color: mainColor
-      })
-    }
+// Build graph for stream depots (topology-based)
+function buildStreamGraph(
+  commits: SubmittedChangelist[],
+  streams: StreamInfo[],
+  currentStreamPath: string | null
+): { nodes: GraphNode[], lanes: LaneInfo[], maxLane: number, isVirtual: false } {
+  if (commits.length === 0) {
+    return { nodes: [], lanes: [], maxLane: 0, isVirtual: false }
+  }
 
-    // Reset merge lane after it ends
-    if (i >= mergeLaneEndIndex) {
-      activeMergeLane = -1
+  // Build stream hierarchy map
+  const streamMap = new Map<string, StreamInfo>()
+  const childrenMap = new Map<string, string[]>()
+
+  for (const s of streams) {
+    streamMap.set(s.stream, s)
+    if (s.parent && s.parent !== 'none') {
+      const children = childrenMap.get(s.parent) || []
+      children.push(s.stream)
+      childrenMap.set(s.parent, children)
     }
   }
 
-  return nodes
+  // Assign lanes to streams based on hierarchy
+  const streamLanes = new Map<string, number>()
+  const laneInfos: LaneInfo[] = []
+
+  const currentStream = currentStreamPath?.replace('/...', '')
+  const currentStreamInfo = currentStream ? streamMap.get(currentStream) : null
+
+  // Determine lane 0 - prefer mainline parent
+  let mainStream = currentStream
+  if (currentStreamInfo?.parent && currentStreamInfo.parent !== 'none') {
+    let parent = currentStreamInfo.parent
+    while (parent && parent !== 'none') {
+      const parentInfo = streamMap.get(parent)
+      if (parentInfo?.type === 'mainline' || !parentInfo?.parent || parentInfo.parent === 'none') {
+        mainStream = parent
+        break
+      }
+      parent = parentInfo.parent
+    }
+  }
+
+  if (mainStream) {
+    const info = streamMap.get(mainStream)
+    streamLanes.set(mainStream, 0)
+    laneInfos.push({
+      stream: mainStream,
+      color: getStreamColor(info?.type || '', info?.name || mainStream),
+      name: info?.name || mainStream.split('/').pop() || 'main',
+      active: true
+    })
+  }
+
+  const streamsWithCommits = new Set(commits.map(c => c.stream).filter(Boolean))
+  let nextLane = 1
+
+  for (const streamPath of streamsWithCommits) {
+    if (streamPath && !streamLanes.has(streamPath)) {
+      const info = streamMap.get(streamPath)
+      streamLanes.set(streamPath, nextLane)
+      laneInfos.push({
+        stream: streamPath,
+        color: getStreamColor(info?.type || '', info?.name || streamPath),
+        name: info?.name || streamPath.split('/').pop() || `stream-${nextLane}`,
+        active: true
+      })
+      nextLane++
+    }
+  }
+
+  const nodes: GraphNode[] = []
+
+  for (let i = 0; i < commits.length; i++) {
+    const commit = commits[i]
+    const streamPath = commit.stream || currentStream || ''
+    const lane = streamLanes.get(streamPath) ?? 0
+    const streamInfo = streamMap.get(streamPath)
+    const color = getStreamColor(streamInfo?.type || '', streamInfo?.name || streamPath)
+
+    const prevCommit = i > 0 ? commits[i - 1] : null
+    const nextCommit = i < commits.length - 1 ? commits[i + 1] : null
+
+    const prevStream = prevCommit?.stream || currentStream
+    const nextStream = nextCommit?.stream || currentStream
+
+    const prevLane = prevStream ? (streamLanes.get(prevStream) ?? 0) : lane
+    const nextLaneVal = nextStream ? (streamLanes.get(nextStream) ?? 0) : lane
+
+    nodes.push({
+      commit,
+      lane,
+      color,
+      streamName: streamInfo?.name || streamPath.split('/').pop() || 'unknown',
+      connectToNext: i < commits.length - 1,
+      connectToPrev: i > 0,
+      prevLane: prevLane !== lane ? prevLane : undefined,
+      nextLane: nextLaneVal !== lane ? nextLaneVal : undefined,
+    })
+  }
+
+  return {
+    nodes,
+    lanes: laneInfos,
+    maxLane: Math.max(0, nextLane - 1),
+    isVirtual: false
+  }
 }
 
-// Draw a curved bezier line
-function drawCurvedLine(
-  ctx: CanvasRenderingContext2D,
-  x1: number, y1: number,
-  x2: number, y2: number,
-  color: string,
-  lineWidth: number = 2
-) {
-  ctx.beginPath()
-  ctx.strokeStyle = color
-  ctx.lineWidth = lineWidth
-  ctx.lineCap = 'round'
+// Build graph for classic depots (author-based virtual lanes)
+function buildVirtualGraph(
+  commits: SubmittedChangelist[],
+  _currentStreamPath: string | null
+): { nodes: GraphNode[], lanes: LaneInfo[], maxLane: number, isVirtual: true } {
+  if (commits.length === 0) {
+    return { nodes: [], lanes: [], maxLane: 0, isVirtual: true }
+  }
 
-  const midY = (y1 + y2) / 2
+  // Group authors by their commit frequency (most active authors get lower lane numbers)
+  const authorCommitCounts = new Map<string, number>()
+  for (const commit of commits) {
+    const count = authorCommitCounts.get(commit.user) || 0
+    authorCommitCounts.set(commit.user, count + 1)
+  }
 
-  // Control points for smooth S-curve
-  ctx.moveTo(x1, y1)
-  ctx.bezierCurveTo(
-    x1, midY,      // First control point
-    x2, midY,      // Second control point
-    x2, y2         // End point
-  )
-  ctx.stroke()
+  // Sort authors by commit count (descending) - most active gets lane 0
+  const sortedAuthors = Array.from(authorCommitCounts.entries())
+    .sort((a, b) => b[1] - a[1])
+    .map(([author]) => author)
+
+  // Limit to 5 lanes max for readability, group remaining into "Others"
+  const MAX_LANES = 5
+  const authorToLane = new Map<string, number>()
+  const laneInfos: LaneInfo[] = []
+
+  for (let i = 0; i < sortedAuthors.length; i++) {
+    const author = sortedAuthors[i]
+    const lane = Math.min(i, MAX_LANES - 1)
+    authorToLane.set(author, lane)
+
+    // Only create lane info for unique lanes
+    if (i < MAX_LANES) {
+      const displayName = i === MAX_LANES - 1 && sortedAuthors.length > MAX_LANES
+        ? `${author} + ${sortedAuthors.length - MAX_LANES} others`
+        : author
+      laneInfos.push({
+        stream: author,
+        color: getAuthorColor(i),
+        name: displayName,
+        active: true
+      })
+    }
+  }
+
+  // If only one author, still create the lane
+  if (laneInfos.length === 0 && commits.length > 0) {
+    const author = commits[0].user
+    authorToLane.set(author, 0)
+    laneInfos.push({
+      stream: author,
+      color: getAuthorColor(0),
+      name: author,
+      active: true
+    })
+  }
+
+  const maxLane = Math.min(sortedAuthors.length - 1, MAX_LANES - 1)
+
+  // Build nodes
+  const nodes: GraphNode[] = []
+
+  for (let i = 0; i < commits.length; i++) {
+    const commit = commits[i]
+    const lane = authorToLane.get(commit.user) ?? 0
+    const color = getAuthorColor(lane)
+
+    const prevCommit = i > 0 ? commits[i - 1] : null
+    const nextCommit = i < commits.length - 1 ? commits[i + 1] : null
+
+    const prevLane = prevCommit ? (authorToLane.get(prevCommit.user) ?? 0) : lane
+    const nextLaneVal = nextCommit ? (authorToLane.get(nextCommit.user) ?? 0) : lane
+
+    nodes.push({
+      commit,
+      lane,
+      color,
+      streamName: commit.user,
+      connectToNext: i < commits.length - 1,
+      connectToPrev: i > 0,
+      prevLane: prevLane !== lane ? prevLane : undefined,
+      nextLane: nextLaneVal !== lane ? nextLaneVal : undefined,
+    })
+  }
+
+  return {
+    nodes,
+    lanes: laneInfos,
+    maxLane: Math.max(0, maxLane),
+    isVirtual: true
+  }
 }
 
-// Graph canvas with curved lines
+// Main build function that chooses the appropriate strategy
+function buildGraph(
+  commits: SubmittedChangelist[],
+  streams: StreamInfo[],
+  currentStreamPath: string | null,
+  isClassicDepot: boolean
+): { nodes: GraphNode[], lanes: LaneInfo[], maxLane: number, isVirtual: boolean } {
+  if (commits.length === 0) {
+    return { nodes: [], lanes: [], maxLane: 0, isVirtual: false }
+  }
+
+  // Use virtual lanes for classic depots or when no stream topology is available
+  if (isClassicDepot || streams.length === 0) {
+    return buildVirtualGraph(commits, currentStreamPath)
+  }
+
+  // Check if we actually have multi-stream commits
+  const uniqueStreams = new Set(commits.map(c => c.stream).filter(Boolean))
+  if (uniqueStreams.size <= 1) {
+    // Even in a stream depot, if all commits are from one stream,
+    // fall back to virtual lanes for better visualization
+    return buildVirtualGraph(commits, currentStreamPath)
+  }
+
+  return buildStreamGraph(commits, streams, currentStreamPath)
+}
+
+// Canvas graph renderer
 function GraphCanvas({
   nodes,
-  mainColor,
+  lanes,
+  maxLane,
   selectedIdx
 }: {
-  nodes: CommitNode[]
-  mainColor: string
+  nodes: GraphNode[]
+  lanes: LaneInfo[]
+  maxLane: number
   selectedIdx: number
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -198,116 +393,126 @@ function GraphCanvas({
     const getLaneX = (lane: number) => LANE_OFFSET + lane * LANE_WIDTH
     const getY = (index: number) => index * ROW_HEIGHT + ROW_HEIGHT / 2
 
-    // Find merge regions for secondary lane visualization
-    const mergeRegions: { start: number; end: number }[] = []
-    let currentRegionStart = -1
-
+    // Track which lanes are active at each row
+    const activeLanesPerRow: Set<number>[] = []
     for (let i = 0; i < nodes.length; i++) {
-      if (nodes[i].isMerge) {
-        if (currentRegionStart === -1) {
-          currentRegionStart = Math.max(0, i - 2)
+      activeLanesPerRow.push(new Set())
+    }
+
+    // First pass: determine active lanes
+    for (let i = 0; i < nodes.length; i++) {
+      const node = nodes[i]
+      activeLanesPerRow[i].add(node.lane)
+
+      // If there's a lane change, both lanes are active in this region
+      if (node.prevLane !== undefined) {
+        // Mark lanes active from prev to current
+        for (let j = Math.max(0, i - 1); j <= i; j++) {
+          activeLanesPerRow[j].add(node.lane)
+          activeLanesPerRow[j].add(node.prevLane)
         }
-      } else if (currentRegionStart !== -1) {
-        mergeRegions.push({ start: currentRegionStart, end: i })
-        currentRegionStart = -1
+      }
+      if (node.nextLane !== undefined) {
+        for (let j = i; j <= Math.min(nodes.length - 1, i + 1); j++) {
+          activeLanesPerRow[j].add(node.lane)
+          activeLanesPerRow[j].add(node.nextLane)
+        }
       }
     }
-    if (currentRegionStart !== -1) {
-      mergeRegions.push({ start: currentRegionStart, end: nodes.length - 1 })
+
+    // Draw lane lines (vertical lines for each active lane segment)
+    for (let laneIdx = 0; laneIdx <= maxLane; laneIdx++) {
+      const laneInfo = lanes[laneIdx]
+      if (!laneInfo) continue
+
+      const x = getLaneX(laneIdx)
+      const color = laneInfo.color
+
+      // Find continuous segments where this lane is active
+      let segmentStart = -1
+      for (let i = 0; i <= nodes.length; i++) {
+        const isActive = i < nodes.length && activeLanesPerRow[i].has(laneIdx)
+
+        if (isActive && segmentStart === -1) {
+          segmentStart = i
+        } else if (!isActive && segmentStart !== -1) {
+          // Draw segment
+          const startY = getY(segmentStart) - ROW_HEIGHT / 2
+          const endY = getY(i - 1) + ROW_HEIGHT / 2
+
+          ctx.beginPath()
+          ctx.strokeStyle = color + '50'
+          ctx.lineWidth = 2
+          ctx.lineCap = 'round'
+          ctx.moveTo(x, startY)
+          ctx.lineTo(x, endY)
+          ctx.stroke()
+
+          segmentStart = -1
+        }
+      }
     }
 
-    // Draw secondary lane lines (for merge visualization)
-    const secondaryColor = LANE_COLORS[1]
-    for (const region of mergeRegions) {
-      const startY = getY(region.start)
-      const endY = getY(region.end)
-      const laneX = getLaneX(1)
+    // Draw curved connections between lanes
+    for (let i = 0; i < nodes.length; i++) {
+      const node = nodes[i]
+      const x = getLaneX(node.lane)
+      const y = getY(i)
 
-      // Draw curved entry from top
-      ctx.beginPath()
-      ctx.strokeStyle = secondaryColor + '60'
-      ctx.lineWidth = 2
-      ctx.lineCap = 'round'
+      // Draw curve from previous lane to current
+      if (node.prevLane !== undefined && i > 0) {
+        const prevX = getLaneX(node.prevLane)
+        const prevY = getY(i - 1)
 
-      // Entry curve from outside
-      const entryStartX = GRAPH_WIDTH
-      const entryStartY = startY - ROW_HEIGHT
-      ctx.moveTo(entryStartX, entryStartY)
-      ctx.bezierCurveTo(
-        laneX + 20, entryStartY,
-        laneX, startY - 20,
-        laneX, startY
-      )
-      ctx.stroke()
+        // Bezier curve from prev node to current
+        ctx.beginPath()
+        ctx.strokeStyle = node.color + 'cc'
+        ctx.lineWidth = 2
+        ctx.lineCap = 'round'
 
-      // Vertical line for secondary lane
-      ctx.beginPath()
-      ctx.strokeStyle = secondaryColor + '60'
-      ctx.lineWidth = 2
-      ctx.moveTo(laneX, startY)
-      ctx.lineTo(laneX, endY)
-      ctx.stroke()
+        // S-curve between lanes
+        const midY = (prevY + y) / 2
+        ctx.moveTo(prevX, prevY)
+        ctx.bezierCurveTo(
+          prevX, midY + (y - prevY) * 0.2,
+          x, midY - (y - prevY) * 0.2,
+          x, y
+        )
+        ctx.stroke()
+      }
 
-      // Exit curve
-      ctx.beginPath()
-      ctx.strokeStyle = secondaryColor + '60'
-      ctx.lineWidth = 2
-      ctx.moveTo(laneX, endY)
-      ctx.bezierCurveTo(
-        laneX, endY + 20,
-        laneX + 20, endY + ROW_HEIGHT,
-        entryStartX, endY + ROW_HEIGHT
-      )
-      ctx.stroke()
+      // Draw curve to next lane
+      if (node.nextLane !== undefined && i < nodes.length - 1) {
+        const nextX = getLaneX(node.nextLane)
+        const nextY = getY(i + 1)
+
+        ctx.beginPath()
+        ctx.strokeStyle = nodes[i + 1].color + 'cc'
+        ctx.lineWidth = 2
+        ctx.lineCap = 'round'
+
+        const midY = (y + nextY) / 2
+        ctx.moveTo(x, y)
+        ctx.bezierCurveTo(
+          x, midY + (nextY - y) * 0.2,
+          nextX, midY - (nextY - y) * 0.2,
+          nextX, nextY
+        )
+        ctx.stroke()
+      }
     }
 
-    // Draw main lane vertical line
-    const mainLaneX = getLaneX(0)
-    ctx.beginPath()
-    ctx.strokeStyle = mainColor + '40'
-    ctx.lineWidth = 2
-    ctx.moveTo(mainLaneX, 0)
-    ctx.lineTo(mainLaneX, height)
-    ctx.stroke()
-
-    // Draw merge curves and nodes
+    // Draw nodes on top
     for (let i = 0; i < nodes.length; i++) {
       const node = nodes[i]
       const x = getLaneX(node.lane)
       const y = getY(i)
       const isSelected = i === selectedIdx
 
-      // Draw merge curve if this is a merge commit
-      if (node.isMerge && node.mergeFromLane !== undefined) {
-        const mergeX = getLaneX(node.mergeFromLane)
-
-        // Draw curved merge line
-        ctx.beginPath()
-        ctx.strokeStyle = LANE_COLORS[1] + 'aa'
-        ctx.lineWidth = 2
-        ctx.lineCap = 'round'
-
-        // Smooth curve from merge lane to main lane
-        ctx.moveTo(mergeX, y - ROW_HEIGHT * 0.3)
-        ctx.bezierCurveTo(
-          mergeX, y,
-          x + 10, y,
-          x, y
-        )
-        ctx.stroke()
-
-        // Small dot on merge lane
-        ctx.beginPath()
-        ctx.fillStyle = LANE_COLORS[1]
-        ctx.arc(mergeX, y - ROW_HEIGHT * 0.3, 3, 0, Math.PI * 2)
-        ctx.fill()
-      }
-
-      // Draw node
-      // Outer glow for selected
+      // Glow for selected
       if (isSelected) {
         ctx.beginPath()
-        ctx.fillStyle = '#3b82f6' + '40'
+        ctx.fillStyle = '#3b82f640'
         ctx.arc(x, y, NODE_RADIUS + 6, 0, Math.PI * 2)
         ctx.fill()
       }
@@ -318,33 +523,20 @@ function GraphCanvas({
       ctx.arc(x, y, NODE_RADIUS + 2, 0, Math.PI * 2)
       ctx.fill()
 
-      // Inner dark circle
+      // Inner dark
       ctx.beginPath()
       ctx.fillStyle = '#1e1e1e'
       ctx.arc(x, y, NODE_RADIUS, 0, Math.PI * 2)
       ctx.fill()
 
-      // Center dot
+      // Center
       ctx.beginPath()
       ctx.fillStyle = isSelected ? '#3b82f6' : node.color
       ctx.arc(x, y, NODE_RADIUS - 2, 0, Math.PI * 2)
       ctx.fill()
-
-      // Merge indicator diamond
-      if (node.isMerge) {
-        ctx.beginPath()
-        ctx.fillStyle = LANE_COLORS[1]
-        const size = 4
-        ctx.moveTo(x + NODE_RADIUS + 6, y)
-        ctx.lineTo(x + NODE_RADIUS + 6 + size, y - size)
-        ctx.lineTo(x + NODE_RADIUS + 6 + size * 2, y)
-        ctx.lineTo(x + NODE_RADIUS + 6 + size, y + size)
-        ctx.closePath()
-        ctx.fill()
-      }
     }
 
-  }, [nodes, mainColor, height, selectedIdx])
+  }, [nodes, lanes, maxLane, height, selectedIdx])
 
   if (nodes.length === 0) return null
 
@@ -357,72 +549,316 @@ function GraphCanvas({
   )
 }
 
+// Debug info interface
+interface DebugInfo {
+  depotName: string | null
+  currentStreamPath: string | null
+  streamsFound: number
+  streamsList: string[]
+  relatedStreams: string[]
+  commitsPerStream: Record<string, number>
+  lanesAssigned: number
+  isClassicDepot: boolean
+}
+
 export function CommitGraph({
   depotPath,
   onSelectChangelist,
   selectedChangelist
 }: CommitGraphProps) {
-  const [changelists, setChangelists] = useState<SubmittedChangelist[]>([])
+  const [commits, setCommits] = useState<SubmittedChangelist[]>([])
+  const [streams, setStreams] = useState<StreamInfo[]>([])
+  const [isClassicDepot, setIsClassicDepot] = useState(false)
   const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [debugInfo, setDebugInfo] = useState<DebugInfo | null>(null)
+  const [showDebug, setShowDebug] = useState(false) // Hidden by default now
   const scrollRef = useRef<HTMLDivElement>(null)
 
-  const streamColor = getStreamColor(depotPath)
-  const streamName = depotPath ? depotPath.split('/').filter(p => p && p !== '...').pop() || 'stream' : 'stream'
-
-  useEffect(() => {
-    if (depotPath) {
-      loadHistory()
-    }
+  // Extract depot name from path
+  const depotName = useMemo(() => {
+    if (!depotPath) return null
+    const match = depotPath.match(/^\/\/([^/]+)/)
+    return match ? match[1] : null
   }, [depotPath])
 
-  const loadHistory = async () => {
-    if (!depotPath) return
+  const currentStreamPath = depotPath?.replace('/...', '') || null
+
+  // Load stream hierarchy and commits
+  const loadData = useCallback(async () => {
+    if (!depotPath || !depotName) return
+
+    setLoading(true)
+    setError(null)
+
+    const debug: DebugInfo = {
+      depotName,
+      currentStreamPath,
+      streamsFound: 0,
+      streamsList: [],
+      relatedStreams: [],
+      commitsPerStream: {},
+      lanesAssigned: 0,
+      isClassicDepot: false
+    }
+
     try {
-      setLoading(true)
-      const changes = await window.p4.getSubmittedChanges(depotPath, 100)
-      setChangelists(changes)
-    } catch (err) {
-      console.error('Failed to load history:', err)
+      // Fetch streams in parallel with current stream's commits
+      console.log('[CommitGraph] Fetching streams for depot:', depotName)
+      const [streamsData, currentCommits] = await Promise.all([
+        window.p4.getStreams(depotName).catch((err) => {
+          console.log('[CommitGraph] getStreams failed:', err)
+          return []
+        }),
+        window.p4.getSubmittedChanges(depotPath, 50)
+      ])
+
+      console.log('[CommitGraph] Streams returned:', streamsData)
+      console.log('[CommitGraph] Current commits count:', currentCommits.length)
+
+      // Map streams to our format
+      const streamInfos: StreamInfo[] = streamsData.map((s: any) => ({
+        stream: s.stream,
+        name: s.name || s.stream.split('/').pop(),
+        parent: s.parent || 'none',
+        type: s.type || 'development'
+      }))
+
+      debug.streamsFound = streamInfos.length
+      debug.streamsList = streamInfos.map(s => `${s.name} (${s.type}, parent: ${s.parent})`)
+
+      // Determine if this is a classic depot (no streams found)
+      const isClassic = streamInfos.length === 0
+      debug.isClassicDepot = isClassic
+      setIsClassicDepot(isClassic)
+      setStreams(streamInfos)
+
+      // Tag commits with their stream
+      const taggedCommits = currentCommits.map((c: SubmittedChangelist) => ({
+        ...c,
+        stream: currentStreamPath || undefined
+      }))
+
+      debug.commitsPerStream[currentStreamPath || 'current'] = taggedCommits.length
+
+      // Find related streams (parent and siblings)
+      const currentStreamInfo = streamInfos.find(s => s.stream === currentStreamPath)
+      console.log('[CommitGraph] Current stream info:', currentStreamInfo)
+
+      const relatedStreams: string[] = []
+
+      if (currentStreamInfo?.parent && currentStreamInfo.parent !== 'none') {
+        relatedStreams.push(currentStreamInfo.parent)
+        console.log('[CommitGraph] Added parent stream:', currentStreamInfo.parent)
+
+        // Also get sibling streams (same parent)
+        for (const s of streamInfos) {
+          if (s.parent === currentStreamInfo.parent && s.stream !== currentStreamPath) {
+            relatedStreams.push(s.stream)
+            console.log('[CommitGraph] Added sibling stream:', s.stream)
+          }
+        }
+      } else {
+        console.log('[CommitGraph] No parent stream found. Current stream path:', currentStreamPath)
+        console.log('[CommitGraph] Available streams:', streamInfos.map(s => s.stream))
+      }
+
+      // Also get child streams
+      for (const s of streamInfos) {
+        if (s.parent === currentStreamPath) {
+          relatedStreams.push(s.stream)
+          console.log('[CommitGraph] Added child stream:', s.stream)
+        }
+      }
+
+      debug.relatedStreams = relatedStreams
+
+      // Fetch commits from related streams (limit to prevent too many requests)
+      const relatedCommitPromises = relatedStreams.slice(0, 3).map(async (streamPath) => {
+        try {
+          const commits = await window.p4.getSubmittedChanges(streamPath + '/...', 20)
+          console.log(`[CommitGraph] Fetched ${commits.length} commits from ${streamPath}`)
+          debug.commitsPerStream[streamPath] = commits.length
+          return commits.map((c: SubmittedChangelist) => ({ ...c, stream: streamPath }))
+        } catch (err) {
+          console.log(`[CommitGraph] Failed to fetch commits from ${streamPath}:`, err)
+          debug.commitsPerStream[streamPath] = 0
+          return []
+        }
+      })
+
+      const relatedCommitsArrays = await Promise.all(relatedCommitPromises)
+      const allRelatedCommits = relatedCommitsArrays.flat()
+
+      console.log('[CommitGraph] Total related commits:', allRelatedCommits.length)
+
+      // Merge and sort all commits by date
+      const allCommits = [...taggedCommits, ...allRelatedCommits]
+      allCommits.sort((a, b) => parseDate(b.date) - parseDate(a.date))
+
+      // Remove duplicates (same changelist number)
+      const seen = new Set<number>()
+      const uniqueCommits = allCommits.filter(c => {
+        if (seen.has(c.number)) return false
+        seen.add(c.number)
+        return true
+      })
+
+      // Count unique streams in final commits
+      const uniqueStreams = new Set(uniqueCommits.map(c => c.stream))
+      debug.lanesAssigned = uniqueStreams.size
+      console.log('[CommitGraph] Unique streams in final commits:', Array.from(uniqueStreams))
+
+      setCommits(uniqueCommits.slice(0, 100))
+      setDebugInfo(debug)
+    } catch (err: any) {
+      console.error('Failed to load graph data:', err)
+      setError(err.message || 'Failed to load data')
+      debug.isClassicDepot = true
+      setDebugInfo(debug)
+      setIsClassicDepot(true) // Assume classic on error
+
+      // Fallback: just load current stream commits
+      try {
+        const changes = await window.p4.getSubmittedChanges(depotPath, 100)
+        setCommits(changes.map((c: SubmittedChangelist) => ({ ...c, stream: currentStreamPath || undefined })))
+      } catch {
+        setCommits([])
+      }
     } finally {
       setLoading(false)
     }
-  }
+  }, [depotPath, depotName, currentStreamPath])
 
-  // Calculate lane assignments
-  const nodes = useMemo(() =>
-    calculateLanes(changelists, streamColor),
-    [changelists, streamColor]
+  useEffect(() => {
+    if (depotPath) {
+      loadData()
+    }
+  }, [depotPath, loadData])
+
+  // Build graph structure
+  const { nodes, lanes, maxLane, isVirtual } = useMemo(
+    () => buildGraph(commits, streams, currentStreamPath, isClassicDepot),
+    [commits, streams, currentStreamPath, isClassicDepot]
   )
 
-  const selectedIdx = changelists.findIndex(c => c.number === selectedChangelist)
-  const totalHeight = changelists.length * ROW_HEIGHT
+  const selectedIdx = commits.findIndex(c => c.number === selectedChangelist)
+  const totalHeight = commits.length * ROW_HEIGHT
 
-  // Count merges for display
-  const mergeCount = nodes.filter(n => n.isMerge).length
+  // Current stream display name
+  const streamName = currentStreamPath?.split('/').filter(p => p).pop() || 'stream'
 
   return (
     <div className="h-full flex flex-col bg-p4-dark">
       {/* Header */}
-      <div className="p-3 border-b border-p4-border flex items-center justify-between flex-shrink-0">
-        <div className="flex items-center gap-2">
-          <span className="w-3 h-3 rounded-full" style={{ backgroundColor: streamColor }} />
-          <span className="text-sm font-medium text-white">{streamName}</span>
-          <span className="text-xs text-gray-500">
-            {changelists.length} commits
-            {mergeCount > 0 && ` (${mergeCount} merges)`}
-          </span>
+      <div className="p-3 border-b border-p4-border flex-shrink-0">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <span
+              className="w-3 h-3 rounded-full"
+              style={{ backgroundColor: lanes[0]?.color || '#6b7280' }}
+            />
+            <span className="text-sm font-medium text-white">{streamName}</span>
+          </div>
+          <button
+            onClick={loadData}
+            disabled={loading}
+            className="text-gray-500 hover:text-gray-300 p-1 disabled:opacity-50"
+            title="Refresh"
+          >
+            <svg className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+            </svg>
+          </button>
         </div>
-        <button
-          onClick={loadHistory}
-          disabled={loading}
-          className="text-gray-500 hover:text-gray-300 p-1 disabled:opacity-50"
-          title="Refresh"
-        >
-          <svg className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-          </svg>
-        </button>
+
+        {/* Virtual lanes indicator */}
+        {isVirtual && lanes.length > 1 && (
+          <div className="flex items-center gap-1 mt-2">
+            <span className="text-[10px] px-1.5 py-0.5 rounded bg-yellow-500/20 text-yellow-400">
+              Inferred lanes by author
+            </span>
+            <span className="text-[10px] text-gray-500">
+              (classic depot)
+            </span>
+          </div>
+        )}
+
+        {/* Stream/Lane legend */}
+        {lanes.length > 1 && (
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mt-2 text-xs">
+            {lanes.map((lane, idx) => (
+              <div key={idx} className="flex items-center gap-1">
+                <span
+                  className="w-2 h-2 rounded-full"
+                  style={{ backgroundColor: lane.color }}
+                />
+                <span className="text-gray-400 truncate max-w-[80px]" title={lane.name}>
+                  {lane.name}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <div className="flex items-center justify-between mt-1">
+          <div className="text-xs text-gray-500">
+            {commits.length} commits
+            {lanes.length > 1 && (isVirtual
+              ? ` by ${lanes.length} authors`
+              : ` across ${lanes.length} streams`
+            )}
+          </div>
+          <button
+            onClick={() => setShowDebug(!showDebug)}
+            className="text-xs text-gray-500 hover:text-gray-300"
+          >
+            {showDebug ? 'Hide' : 'Show'} Debug
+          </button>
+        </div>
       </div>
+
+      {/* Debug Panel */}
+      {showDebug && debugInfo && (
+        <div className="p-2 border-b border-p4-border bg-gray-900 text-xs font-mono overflow-auto max-h-48">
+          <div className="text-yellow-400 mb-1">Debug Info:</div>
+          <div className="text-gray-400">
+            <div>Depot: <span className="text-white">{debugInfo.depotName || 'null'}</span></div>
+            <div>Current Stream: <span className="text-white">{debugInfo.currentStreamPath || 'null'}</span></div>
+            <div>Depot Type: <span className={debugInfo.isClassicDepot ? 'text-yellow-400' : 'text-green-400'}>
+              {debugInfo.isClassicDepot ? 'Classic (using virtual lanes)' : 'Stream depot'}
+            </span></div>
+            <div>Streams Found: <span className="text-white">{debugInfo.streamsFound}</span></div>
+            {debugInfo.streamsList.length > 0 && (
+              <div className="mt-1">
+                <div className="text-yellow-400">Streams in depot:</div>
+                {debugInfo.streamsList.map((s, i) => (
+                  <div key={i} className="ml-2 text-green-400">{s}</div>
+                ))}
+              </div>
+            )}
+            {debugInfo.relatedStreams.length > 0 ? (
+              <div className="mt-1">
+                <div className="text-yellow-400">Related streams (parent/sibling/child):</div>
+                {debugInfo.relatedStreams.map((s, i) => (
+                  <div key={i} className="ml-2 text-blue-400">{s}</div>
+                ))}
+              </div>
+            ) : (
+              <div className="mt-1 text-red-400">No related streams found</div>
+            )}
+            <div className="mt-1">
+              <div className="text-yellow-400">Commits per stream:</div>
+              {Object.entries(debugInfo.commitsPerStream).map(([stream, count]) => (
+                <div key={stream} className="ml-2">
+                  <span className="text-purple-400">{stream}</span>: <span className="text-white">{count}</span>
+                </div>
+              ))}
+            </div>
+            <div className="mt-1">Lanes assigned: <span className="text-white">{debugInfo.lanesAssigned}</span></div>
+          </div>
+        </div>
+      )}
 
       {/* Scrollable content */}
       <div ref={scrollRef} className="flex-1 overflow-y-auto">
@@ -430,7 +866,11 @@ export function CommitGraph({
           <div className="p-4 text-sm text-gray-500 text-center">
             Loading history...
           </div>
-        ) : changelists.length === 0 ? (
+        ) : error ? (
+          <div className="p-4 text-sm text-red-400 text-center">
+            {error}
+          </div>
+        ) : commits.length === 0 ? (
           <div className="p-4 text-sm text-gray-500 text-center">
             {depotPath ? 'No commits found' : 'Select a workspace'}
           </div>
@@ -440,16 +880,23 @@ export function CommitGraph({
             <div className="flex-shrink-0 bg-p4-darker">
               <GraphCanvas
                 nodes={nodes}
-                mainColor={streamColor}
+                lanes={lanes}
+                maxLane={maxLane}
                 selectedIdx={selectedIdx}
               />
             </div>
 
             {/* Commit rows */}
             <div className="flex-1 min-w-0">
-              {changelists.map((item, index) => {
+              {commits.map((item, index) => {
                 const isSelected = selectedChangelist === item.number
                 const node = nodes[index]
+                const isCurrentStream = item.stream === currentStreamPath
+                // Show stream badge for non-current streams, or author badge in virtual mode
+                const showBadge = isVirtual
+                  ? (lanes.length > 1) // In virtual mode, show badge if multiple authors
+                  : (!isCurrentStream && node) // In stream mode, show if different stream
+
                 return (
                   <div
                     key={item.number}
@@ -463,27 +910,33 @@ export function CommitGraph({
                   >
                     {/* User Avatar */}
                     <div
-                      className="w-8 h-8 rounded-full flex items-center justify-center text-xs font-medium flex-shrink-0"
-                      style={{ backgroundColor: getUserColor(item.user) }}
+                      className="w-7 h-7 rounded-full flex items-center justify-center text-xs font-medium flex-shrink-0"
+                      style={{ backgroundColor: isVirtual && node ? node.color : getUserColor(item.user) }}
                       title={item.user}
                     >
                       {getUserInitials(item.user)}
                     </div>
 
-                    <div className="flex-1 min-w-0 ml-3">
+                    <div className="flex-1 min-w-0 ml-2">
                       <div className="flex items-center gap-2">
-                        <span className="text-sm text-white truncate flex-1">
+                        <span className="text-sm text-white truncate">
                           {item.description || '(no description)'}
                         </span>
-                        {node?.isMerge && (
-                          <span className="text-xs px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-400 flex-shrink-0">
-                            merge
+                      </div>
+                      <div className="flex items-center gap-2 mt-0.5 text-xs">
+                        <span className="font-mono text-gray-400">@{item.number}</span>
+                        <span className="text-gray-500">{item.user}</span>
+                        {showBadge && node && !isVirtual && (
+                          <span
+                            className="px-1.5 py-0.5 rounded text-[10px]"
+                            style={{
+                              backgroundColor: node.color + '20',
+                              color: node.color
+                            }}
+                          >
+                            {node.streamName}
                           </span>
                         )}
-                      </div>
-                      <div className="flex items-center gap-2 mt-1 text-xs text-gray-500">
-                        <span className="font-mono text-gray-400">@{item.number}</span>
-                        <span>{item.user}</span>
                       </div>
                     </div>
 

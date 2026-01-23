@@ -25,6 +25,9 @@
       "dist/**/*",
       "dist-electron/**/*"
     ],
+    "extraResources": [
+      "build/**/*"
+    ],
     "win": {
       "target": [
         "nsis",
@@ -56,6 +59,7 @@
     "react": "^18.2.0",
     "react-diff-view": "^3.2.0",
     "react-dom": "^18.2.0",
+    "react-resizable-panels": "^2.0.19",
     "reactflow": "^11.11.4",
     "unidiff": "^1.0.4",
     "zustand": "^4.5.0"

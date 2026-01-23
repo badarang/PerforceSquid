@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer } from 'electron'
 
 const p4Api = {
   getClients: () => ipcRenderer.invoke('p4:clients'),
+  createClient: (client: any) => ipcRenderer.invoke('p4:createClient', client),
   setClient: (clientName: string) => ipcRenderer.invoke('p4:setClient', clientName),
   getClient: () => ipcRenderer.invoke('p4:getClient'),
   getInfo: () => ipcRenderer.invoke('p4:info'),
@@ -20,6 +21,8 @@ const p4Api = {
   describeChangelist: (changelist: number) =>
     ipcRenderer.invoke('p4:describeChangelist', changelist),
   getClientStream: () => ipcRenderer.invoke('p4:getClientStream'),
+  switchStream: (streamPath: string) => ipcRenderer.invoke('p4:switchStream', streamPath),
+  getCurrentDepot: () => ipcRenderer.invoke('p4:getCurrentDepot'),
   reopenFiles: (files: string[], changelist: number | 'default') =>
     ipcRenderer.invoke('p4:reopenFiles', files, changelist),
   createChangelist: (description: string) =>
@@ -48,9 +51,15 @@ const settingsApi = {
   setAutoLaunch: (enabled: boolean) => ipcRenderer.invoke('settings:setAutoLaunch', enabled),
 }
 
+const dialogApi = {
+  openDirectory: () => ipcRenderer.invoke('dialog:openDirectory'),
+}
+
 contextBridge.exposeInMainWorld('p4', p4Api)
 contextBridge.exposeInMainWorld('settings', settingsApi)
+contextBridge.exposeInMainWorld('dialog', dialogApi)
 
 // Type declaration for renderer
 export type P4Api = typeof p4Api
 export type SettingsApi = typeof settingsApi
+export type DialogApi = typeof dialogApi

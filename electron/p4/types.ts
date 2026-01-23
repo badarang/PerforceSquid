@@ -55,6 +55,8 @@ export interface P4Workspace {
   description: string
   access: string           // last access time
   update: string           // last update time
+  options?: string
+  submitOptions?: string
 }
 
 export interface P4Depot {

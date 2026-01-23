@@ -65,6 +65,122 @@ export class P4Service {
     }
   }
 
+  // Create a new client workspace
+  async createClient(client: {
+    name: string
+    root: string
+    options: string
+    submitOptions: string
+    stream?: string
+    description?: string
+    backup?: boolean // Custom option handled by us, if we want to store it somewhere or use it? 
+                     // Wait, user asked for "Backup enable" which likely refers to p4 option if it exists.
+                     // But as discussed, "backup" is not standard.
+                     // I will assume the user meant the "backup" option if it's supported by their p4 version, 
+                     // or just pass it in the options string if they provide it there.
+                     // The `options` string argument should cover "compress rmdir backup".
+  }): Promise<{ success: boolean; message: string }> {
+    try {
+      // 1. Get default spec
+      const defaultSpec = await this.runCommand(['client', '-o', client.name])
+      
+      // 2. Parse and modify spec
+      const lines = defaultSpec.split('\n')
+      const newLines: string[] = []
+      let insideView = false
+      
+      // We will rebuild the spec. simpler to just replace fields if we find them, 
+      // or append if we don't? `client -o` returns a valid spec.
+      // We need to replace Root, Options, SubmitOptions, Stream (if any)
+      
+      // Helper to set a field
+      const setField = (key: string, value: string) => {
+        const index = newLines.findIndex(l => l.startsWith(key + ':'))
+        if (index !== -1) {
+          newLines[index] = `${key}:\t${value}`
+        } else {
+          // Insert before View or at end
+          const viewIndex = newLines.findIndex(l => l.startsWith('View:'))
+          if (viewIndex !== -1) {
+            newLines.splice(viewIndex, 0, `${key}:\t${value}`)
+          } else {
+            newLines.push(`${key}:\t${value}`)
+          }
+        }
+      }
+
+      // First pass: copy all lines, removing ones we want to override to be safe?
+      // actually `client -o` output is standard.
+      
+      // Better approach: Regex replace on the whole string might be safer for multiline issues?
+      // No, line based is better for specific fields.
+
+      // Let's iterate and replace
+      let skipView = false
+
+      for (const line of lines) {
+        if (line.startsWith('Root:')) {
+          newLines.push(`Root:\t${client.root}`)
+        } else if (line.startsWith('Options:')) {
+          newLines.push(`Options:\t${client.options}`)
+        } else if (line.startsWith('SubmitOptions:')) {
+          newLines.push(`SubmitOptions:\t${client.submitOptions}`)
+        } else if (line.startsWith('Stream:')) {
+           if (client.stream) {
+             newLines.push(`Stream:\t${client.stream}`)
+             skipView = true // Stream clients should not have manual View
+           }
+        } else if (line.startsWith('View:')) {
+           if (skipView) {
+             // Skip the View header
+           } else {
+             newLines.push(line)
+           }
+        } else if (line.startsWith('Description:')) {
+            newLines.push('Description:')
+            newLines.push(`\t${client.description || 'Created by PerforceSquid'}`)
+        } else if (line.startsWith('\t') && newLines[newLines.length - 2]?.startsWith('Description:')) {
+            // Skipping old description lines
+        } else {
+            // Handle View lines (start with tab)
+            if (skipView && line.startsWith('\t') && !line.trim().startsWith('Options:') && !line.trim().startsWith('Root:')) {
+              // This assumes View lines are indented. 
+              // We need to be careful not to skip other indented fields if they appear after View, 
+              // but in standard spec View is usually last.
+              continue
+            }
+            newLines.push(line)
+        }
+      }
+      
+      // Handle missing fields if they weren't in the default spec
+      if (!newLines.some(l => l.startsWith('Root:'))) newLines.splice(newLines.findIndex(l => l.startsWith('View:')), 0, `Root:\t${client.root}`)
+      if (!newLines.some(l => l.startsWith('Options:'))) newLines.splice(newLines.findIndex(l => l.startsWith('View:')), 0, `Options:\t${client.options}`)
+      if (!newLines.some(l => l.startsWith('SubmitOptions:'))) newLines.splice(newLines.findIndex(l => l.startsWith('View:')), 0, `SubmitOptions:\t${client.submitOptions}`)
+      if (client.stream && !newLines.some(l => l.startsWith('Stream:'))) newLines.splice(newLines.findIndex(l => l.startsWith('View:')), 0, `Stream:\t${client.stream}`)
+
+      // If stream is set, View must be empty (generated) or matching stream. 
+      // Safest is to let p4 handle View if Stream is present? 
+      // Actually `client -o` with Stream set returns a generated View. 
+      // If we are adding Stream to a non-stream default spec, we might need to remove View?
+      // But typically `p4 client -i` ignores View if Stream is provided.
+
+      const spec = newLines.join('\n')
+      
+      const output = await this.runCommand(['client', '-i'], spec)
+      
+      return {
+        success: true,
+        message: output
+      }
+    } catch (error: any) {
+      return {
+        success: false,
+        message: error.message
+      }
+    }
+  }
+
   async getClients(): Promise<P4Client[]> {
     try {
       // First get user name
@@ -824,6 +940,46 @@ export class P4Service {
     }
   }
 
+  // Switch the current workspace to a different stream
+  async switchStream(streamPath: string): Promise<{ success: boolean; message: string }> {
+    try {
+      if (!this.currentClient) {
+        return { success: false, message: 'No workspace selected' }
+      }
+
+      // Use p4 client -f -s -S to switch stream
+      // The -f flag forces the switch even if files are opened.
+      const output = await this.runCommand(['client', '-f', '-s', '-S', streamPath, this.currentClient])
+
+      // After switching, also sync the workspace to the new stream head
+      await this.sync()
+
+      return {
+        success: true,
+        message: output || `Switched to ${streamPath}`
+      }
+    } catch (error: any) {
+      return {
+        success: false,
+        message: error.message || 'Failed to switch stream'
+      }
+    }
+  }
+
+  // Get depot name from current workspace
+  async getCurrentDepot(): Promise<string | null> {
+    try {
+      const stream = await this.getClientStream()
+      if (stream) {
+        const match = stream.match(/^\/\/([^/]+)/)
+        return match ? match[1] : null
+      }
+      return null
+    } catch {
+      return null
+    }
+  }
+
   // Get file annotation (blame) - who changed each line
   async annotate(filePath: string): Promise<{
     success: boolean
@@ -931,20 +1087,13 @@ export class P4Service {
   // Get all depots
   async getDepots(): Promise<P4Depot[]> {
     try {
-      const output = await this.runCommand(['depots'])
-      const depots: P4Depot[] = []
-      const lines = output.trim().split('\n')
-
-      for (const line of lines) {
-        // Format: Depot name date type map 'description'
-        const match = line.match(/^Depot\s+(\S+)\s+\S+\s+(\S+)\s+(\S+)\s+'(.*)'/)
-        if (match) {
-          const [, depot, type, map, description] = match
-          depots.push({ depot, type, map, description })
-        }
-      }
-
-      return depots
+      const depotsData = await this.runCommandJson<any[]>(['depots'])
+      return depotsData.map(d => ({
+        depot: d.Depot || d.name,
+        type: d.Type || d.type,
+        map: d.Map || d.map,
+        description: d.Desc || d.desc || ''
+      }))
     } catch (error) {
       return []
     }
@@ -953,40 +1102,71 @@ export class P4Service {
   // Get all streams in a depot
   async getStreams(depot?: string): Promise<P4Stream[]> {
     try {
-      const depotPattern = depot ? `//${depot}/...` : '//...'
-      const output = await this.runCommand(['streams', depotPattern])
-
-      if (!output.trim()) {
+      if (!depot) {
         return []
       }
 
-      const streams: P4Stream[] = []
-      const lines = output.trim().split('\n')
+      const depots = await this.getDepots()
+      const currentDepotInfo = depots.find(d => d.depot === depot)
+      // Check for 'stream' type (case-insensitive just in case)
+      const isStreamDepot = currentDepotInfo?.type?.toLowerCase() === 'stream'
 
-      for (const line of lines) {
-        // Format: Stream //depot/stream date 'owner' type parent 'description'
-        // Example: Stream //depot/main 2024/01/01 'admin' mainline none 'Main development stream'
-        const match = line.match(/^Stream\s+(\S+)\s+\S+\s+'([^']*)'?\s+(\S+)\s+(\S+)\s+'(.*)'$/)
-        if (match) {
-          const [, streamPath, owner, type, parent, description] = match
-          const streamName = streamPath.split('/').pop() || streamPath
-          const depotName = streamPath.split('/')[2] || ''
+      if (isStreamDepot) {
+        const depotPattern = `//${depot}/...`
+        // Use -ztag via runCommandJson for reliable parsing
+        const streamsData = await this.runCommandJson<any[]>(['streams', depotPattern])
 
-          streams.push({
+        return streamsData.map(s => {
+          const streamPath = s.Stream || s.stream
+          // Extract name from path if Name field is missing
+          const streamName = s.Name || (streamPath ? streamPath.split('/').pop() : '') || streamPath
+          
+          return {
             stream: streamPath,
             name: streamName,
-            parent: parent === 'none' ? 'none' : parent,
-            type: type as StreamType,
-            owner,
-            description,
-            options: '',
-            depotName
-          })
-        }
-      }
+            parent: (s.Parent || s.parent) === 'none' ? 'none' : (s.Parent || s.parent),
+            type: (s.Type || s.type) as StreamType,
+            owner: s.Owner || s.owner || '',
+            description: s.Desc || s.desc || '',
+            options: s.Options || s.options || '',
+            depotName: depot
+          }
+        })
+      } else {
+        // Fallback for classic depots: treat top-level folders as virtual streams
+        // p4 dirs doesn't support -ztag -Mj nicely in all versions or outputs simple list
+        // So we stick to text parsing for dirs
+        const depotPattern = `//${depot}/*`
+        const output = await this.runCommand(['dirs', depotPattern])
 
-      return streams
+        if (!output.trim()) {
+          return []
+        }
+
+        const streams: P4Stream[] = []
+        const lines = output.trim().split('\n')
+
+        for (const line of lines) {
+          const streamPath = line.trim()
+          // Ignore if line contains "no such file" or similar error text usually in stderr but sometimes stdout?
+          if (streamPath && streamPath.startsWith('//')) {
+            const streamName = streamPath.split('/').pop() || streamPath
+            streams.push({
+              stream: streamPath,
+              name: streamName,
+              parent: 'none', // No parent hierarchy in classic depots
+              type: 'development', // Default type
+              owner: '',
+              description: 'Classic depot virtual stream',
+              options: '',
+              depotName: depot
+            })
+          }
+        }
+        return streams
+      }
     } catch (error) {
+      console.error('getStreams error:', error)
       return []
     }
   }
@@ -1091,6 +1271,10 @@ export class P4Service {
           workspace.access = line.replace('Access:', '').trim()
         } else if (line.startsWith('Update:')) {
           workspace.update = line.replace('Update:', '').trim()
+        } else if (line.startsWith('Options:')) {
+          workspace.options = line.replace('Options:', '').trim()
+        } else if (line.startsWith('SubmitOptions:')) {
+          workspace.submitOptions = line.replace('SubmitOptions:', '').trim()
         }
       }
 

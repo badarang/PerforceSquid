@@ -111,3 +111,37 @@ body {
 .animate-slide-in {
   animation: slide-in 0.3s ease-out;
 }
+
+/* react-resizable-panels styles */
+.resize-handle-outer {
+  @apply bg-transparent;
+}
+
+.resize-handle-inner {
+  @apply bg-p4-border;
+  transition: background-color 0.2s ease-out;
+}
+
+.resize-handle-outer[data-panel-group-direction="horizontal"] {
+    width: 7px;
+}
+.resize-handle-outer[data-panel-group-direction="vertical"] {
+    height: 7px;
+}
+
+.resize-handle-outer[data-panel-group-direction="horizontal"] > .resize-handle-inner {
+  width: 1px;
+  height: 100%;
+  margin-left: 3px;
+}
+
+.resize-handle-outer[data-panel-group-direction="vertical"] > .resize-handle-inner {
+  height: 1px;
+  width: 100%;
+  margin-top: 3px;
+}
+
+.resize-handle-outer:hover > .resize-handle-inner,
+.resize-handle-outer[data-dragging="true"] > .resize-handle-inner {
+    @apply bg-p4-blue;
+}
