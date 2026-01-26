@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import { getUserColor, getUserInitials } from '../utils/userIcon'
+import iconSvg from '../assets/icon.svg'
 
 interface SubmittedChangelist {
   number: number
@@ -863,8 +864,9 @@ export function CommitGraph({
       {/* Scrollable content */}
       <div ref={scrollRef} className="flex-1 overflow-y-auto">
         {loading ? (
-          <div className="p-4 text-sm text-gray-500 text-center">
-            Loading history...
+          <div className="flex flex-col items-center justify-center py-8 text-center">
+            <img src={iconSvg} className="w-8 h-8 mb-2 animate-doom-chit" alt="Loading..." />
+            <div className="text-sm text-gray-500">Loading history...</div>
           </div>
         ) : error ? (
           <div className="p-4 text-sm text-red-400 text-center">

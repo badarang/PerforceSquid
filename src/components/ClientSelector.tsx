@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { SquidIcon } from './SquidIcon'
+import iconSvg from '../assets/icon.svg'
 
 interface P4Client {
   name: string
@@ -251,7 +251,7 @@ export function ClientSelector({ onClientSelected }: ClientSelectorProps) {
     return (
       <div className="h-screen bg-p4-dark flex items-center justify-center">
         <div className="text-center">
-          <SquidIcon className="w-20 h-20 mx-auto mb-4 animate-doom-chit" />
+          <img src={iconSvg} className="w-12 h-12 mx-auto mb-4 animate-doom-chit" alt="Loading..." />
           <div className="text-xl text-gray-300 mb-2">Loading workspaces...</div>
           <div className="text-sm text-gray-500">Please wait</div>
         </div>

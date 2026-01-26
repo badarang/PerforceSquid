@@ -10,9 +10,10 @@ function createWindow() {
   const isDev = process.env.VITE_DEV_SERVER_URL;
   
   // Restore window state
-  let windowState = { width: 1280, height: 720, x: undefined, y: undefined }
+  let windowState = { width: 1280, height: 800, x: undefined, y: undefined }
   const statePath = path.join(app.getPath('userData'), 'window-state.json')
   
+  /* Temporarily disable state restore to force correct size for user
   try {
     if (fs.existsSync(statePath)) {
       const savedState = JSON.parse(fs.readFileSync(statePath, 'utf8'))
@@ -21,6 +22,7 @@ function createWindow() {
   } catch (e) {
     // Ignore error
   }
+  */
 
   mainWindow = new BrowserWindow({
     width: windowState.width,
@@ -191,6 +193,27 @@ ipcMain.handle('p4:annotate', async (_, filePath: string) => {
   return p4Service.annotate(filePath)
 })
 
+ipcMain.handle('p4:readFile', async (_, filePath: string) => {
+  try {
+    if (!fs.existsSync(filePath)) {
+      return { success: false, message: 'File not found' }
+    }
+    const content = fs.readFileSync(filePath, 'utf8')
+    return { success: true, content }
+  } catch (err: any) {
+    return { success: false, message: err.message }
+  }
+})
+
+ipcMain.handle('p4:saveFile', async (_, filePath: string, content: string) => {
+  try {
+    fs.writeFileSync(filePath, content, 'utf8')
+    return { success: true }
+  } catch (err: any) {
+    return { success: false, message: err.message }
+  }
+})
+
 // Stream Graph IPC Handlers
 ipcMain.handle('p4:getDepots', async () => {
   return p4Service.getDepots()
@@ -249,4 +272,29 @@ ipcMain.handle('dialog:openDirectory', async () => {
     return null
   }
   return result.filePaths[0]
+})
+
+ipcMain.handle('window:openDiffWindow', async (_, file: any, mode: string = 'diff') => {
+  const diffWindow = new BrowserWindow({
+    width: 1200,
+    height: 800,
+    title: `Diff: ${file.clientFile || file.depotFile}`,
+    icon: path.join(process.env.VITE_DEV_SERVER_URL ? process.cwd() : process.resourcesPath, 'build/icon.png'),
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false
+    },
+    backgroundColor: '#1e1e1e',
+    show: false
+  })
+  diffWindow.setMenu(null)
+
+  const fileParam = encodeURIComponent(JSON.stringify(file))
+  const url = process.env.VITE_DEV_SERVER_URL
+    ? `${process.env.VITE_DEV_SERVER_URL}/#diff?file=${fileParam}&mode=${mode}`
+    : `file://${path.join(__dirname, '../dist/index.html')}#diff?file=${fileParam}&mode=${mode}`
+
+  diffWindow.loadURL(url)
+  diffWindow.once('ready-to-show', () => diffWindow.show())
 })

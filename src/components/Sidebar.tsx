@@ -1,4 +1,5 @@
 import { useP4Store } from '../stores/p4Store'
+import iconSvg from '../assets/icon.svg'
 
 interface SidebarProps {
   onSelectChangelist?: () => void
@@ -9,7 +10,8 @@ export function Sidebar({ onSelectChangelist }: SidebarProps) {
     changelists,
     files,
     selectedChangelist,
-    setSelectedChangelist
+    setSelectedChangelist,
+    isLoading
   } = useP4Store()
 
   const handleSelectChangelist = (cl: number | 'default') => {
@@ -34,7 +36,12 @@ export function Sidebar({ onSelectChangelist }: SidebarProps) {
       </div>
 
       <div className="flex-1 overflow-y-auto">
-        {changelists.length === 0 ? (
+        {isLoading ? (
+          <div className="flex flex-col items-center justify-center py-8 text-center">
+            <img src={iconSvg} className="w-8 h-8 mb-2 animate-doom-chit" alt="Loading..." />
+            <div className="text-sm text-gray-500">Loading changes...</div>
+          </div>
+        ) : changelists.length === 0 ? (
           <div className="p-3 text-sm text-gray-500">
             No pending changelists
           </div>

@@ -55,6 +55,8 @@ interface P4Api {
     }>
     message?: string
   }>
+  readFile: (filePath: string) => Promise<{ success: boolean; content?: string; message?: string }>
+  saveFile: (filePath: string, content: string) => Promise<{ success: boolean; message?: string }>
   // Stream Graph APIs
   getDepots: () => Promise<P4Depot[]>
   getStreams: (depot?: string) => Promise<P4Stream[]>
@@ -64,6 +66,7 @@ interface P4Api {
   getWorkspaceDetails: (clientName: string) => Promise<P4Workspace | null>
   getStreamGraphData: (depot: string) => Promise<StreamGraphData>
   getInterchanges: (fromStream: string, toStream: string) => Promise<StreamRelation>
+  openDiffWindow: (file: P4File) => Promise<void>
 }
 
 interface SettingsApi {

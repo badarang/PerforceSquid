@@ -244,9 +244,10 @@ export class P4Service {
     return info as P4Info
   }
 
-async getOpenedFiles(): Promise<P4File[]> {
+  async getOpenedFiles(): Promise<P4File[]> {
     try {
-      const output = await this.runCommand(['-ztag', 'opened', '//...'])
+      // Use fstat -Ro to get local file paths in clientFile
+      const output = await this.runCommand(['-ztag', 'fstat', '-Ro', '//...'])
       
       if (!output.trim()) {
         return []
@@ -284,7 +285,7 @@ async getOpenedFiles(): Promise<P4File[]> {
       pushCurrentFile()
       return files
     } catch (error: any) {
-      if (error.message?.includes('not opened')) return []
+      if (error.message?.includes('not opened') || error.message?.includes('no such file')) return []
       throw error
     }
   }
@@ -296,10 +297,9 @@ async getOpenedFiles(): Promise<P4File[]> {
       clientFile: data.clientFile || '',
       action: (data.action || 'edit') as P4File['action'],
       changelist: isNaN(changelist as number) && changelist !== 'default' ? 'default' : changelist,
-      type: data.type || 'text'
+      type: data.type || data.headType || 'text'
     }
   }
-
 async getDiff(file: P4File | string): Promise<P4DiffResult> {
     const depotPath = typeof file === 'string' ? file : file.depotFile
     const clientPath = typeof file === 'string' ? null : file.clientFile

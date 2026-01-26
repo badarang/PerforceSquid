@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useMemo } from 'react'
-import { SquidIcon } from './SquidIcon'
+import iconSvg from '../assets/icon.svg'
 
 interface Stream {
   stream: string
@@ -143,7 +143,7 @@ export function StreamSelector({ currentStream, onStreamChange }: StreamSelector
   }, [streams, favoriteStreams])
 
   const otherGroupedStreams = useMemo(() => {
-    return otherItems.reduce((acc, stream) => {
+    return otherItems.reduce((acc: Record<string, Stream[]>, stream) => {
       const parentKey = stream.parent === 'none' ? '__root__' : stream.parent
       if (!acc[parentKey]) acc[parentKey] = []
       acc[parentKey].push(stream)
@@ -230,10 +230,10 @@ export function StreamSelector({ currentStream, onStreamChange }: StreamSelector
 
           <div className="max-h-80 overflow-y-auto">
             {loading ? (
-              <div className="px-3 py-4 text-sm text-gray-500 text-center">
-                <SquidIcon className="w-8 h-8 mx-auto mb-2 animate-doom-chit" />
-                Loading streams...
-              </div>
+            <div className="text-center py-4">
+              <img src={iconSvg} className="w-8 h-8 mx-auto mb-2 animate-doom-chit" alt="Loading..." />
+              <div className="text-gray-400">Loading streams...</div>
+            </div>
             ) : streams.length === 0 ? (
               <div className="px-3 py-4 text-sm text-gray-500 text-center">No streams found<div className="text-xs mt-1">(Classic depot?)</div></div>
             ) : (

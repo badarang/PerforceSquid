@@ -38,6 +38,8 @@ const p4Api = {
     ipcRenderer.invoke('p4:getOrCreateJunkChangelist'),
   annotate: (filePath: string) =>
     ipcRenderer.invoke('p4:annotate', filePath),
+  readFile: (filePath: string) => ipcRenderer.invoke('p4:readFile', filePath),
+  saveFile: (filePath: string, content: string) => ipcRenderer.invoke('p4:saveFile', filePath, content),
   // Stream Graph APIs
   getDepots: () => ipcRenderer.invoke('p4:getDepots'),
   getStreams: (depot?: string) => ipcRenderer.invoke('p4:getStreams', depot),
@@ -47,6 +49,7 @@ const p4Api = {
   getWorkspaceDetails: (clientName: string) => ipcRenderer.invoke('p4:getWorkspaceDetails', clientName),
   getStreamGraphData: (depot: string) => ipcRenderer.invoke('p4:getStreamGraphData', depot),
   getInterchanges: (fromStream: string, toStream: string) => ipcRenderer.invoke('p4:getInterchanges', fromStream, toStream),
+  openDiffWindow: (file: any, mode?: 'diff' | 'edit') => ipcRenderer.invoke('window:openDiffWindow', file, mode),
 }
 
 const settingsApi = {

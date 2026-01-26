@@ -3,6 +3,7 @@ import { useP4Store } from '../stores/p4Store'
 import { useToastContext } from '../App'
 import { Settings } from './Settings'
 import { StreamSelector } from './StreamSelector'
+import iconSvg from '../assets/icon.svg'
 
 // Loading overlay component
 function LoadingOverlay({ message }: { message: string }) {
@@ -10,7 +11,7 @@ function LoadingOverlay({ message }: { message: string }) {
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
       <div className="bg-p4-darker border border-p4-border rounded-lg p-6 shadow-xl">
         <div className="flex items-center gap-4">
-          <div className="w-6 h-6 border-2 border-p4-blue border-t-transparent rounded-full animate-spin" />
+          <img src={iconSvg} className="w-8 h-8 animate-spin" alt="Loading..." />
           <div className="text-white">{message}</div>
         </div>
       </div>
