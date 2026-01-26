@@ -244,22 +244,15 @@ export class P4Service {
     return info as P4Info
   }
 
-  async getOpenedFiles(): Promise<P4File[]> {
+async getOpenedFiles(): Promise<P4File[]> {
     try {
-      // Use -ztag without -Mj for maximum compatibility and robustness
       const output = await this.runCommand(['-ztag', 'opened', '//...'])
       
-      // DEBUG: Write raw output to file
-      try {
-        await fs.writeFile('debug_raw_output.txt', output)
-      } catch (e) { console.error('Failed to write debug log', e) }
-
       if (!output.trim()) {
         return []
       }
 
       const files: P4File[] = []
-      // Robust splitting: handle \r\n, \r, and \n
       const lines = output.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n')
       
       let currentFile: any = {}
@@ -272,54 +265,26 @@ export class P4Service {
       }
 
       for (const line of lines) {
-        const trimmed = line.trim()
-        
-        // Blank line usually separates records in -Ztag output
-        if (!trimmed) {
-          pushCurrentFile()
+        const match = line.match(/^\.\.\.\s+(\w+)\s+(.*)$/)
+        if (!match) {
+          if (line.trim() === '') pushCurrentFile()
           continue
         }
 
-        // Parse ztag line manually: "... key value"
-        // Regex can be flaky with some encodings or characters, using strict string parsing
-        if (!line.startsWith('... ')) continue
-        
-        // Find end of key (first space after '... ')
-        const keyStart = 4 // length of "... "
-        const keyEnd = line.indexOf(' ', keyStart)
-        
-        if (keyEnd === -1) continue // Invalid format
-        
-        const key = line.substring(keyStart, keyEnd)
-        const value = line.substring(keyEnd + 1).trim()
-        
-        // Safety check: if we see depotFile and we already have one, it's a new record
+        const [, key, value] = match
+        const trimmedValue = value.trim()
+
         if (key === 'depotFile' && currentFile.depotFile) {
           pushCurrentFile()
         }
 
-        currentFile[key] = value
+        currentFile[key] = trimmedValue
       }
       
-      // Push the last file
       pushCurrentFile()
-      
-      // DEBUG: Write parsed files to file
-      try {
-        await fs.writeFile('debug_parsed_files.txt', JSON.stringify(files, null, 2))
-      } catch (e) { console.error('Failed to write debug parsed log', e) }
-
-      // Debug logging to help identify parsing issues
-      console.log(`Parsed ${files.length} opened files`)
-      if (files.length > 0) {
-          console.log('First file sample:', JSON.stringify(files[0]))
-      }
-
       return files
     } catch (error: any) {
-      if (error.message?.includes('not opened')) {
-        return []
-      }
+      if (error.message?.includes('not opened')) return []
       throw error
     }
   }
@@ -335,39 +300,43 @@ export class P4Service {
     }
   }
 
-  async getDiff(filePath: string): Promise<P4DiffResult> {
-    try {
-      // Get the diff output
-      const diffOutput = await this.runCommand(['diff', '-du', `"${filePath}"`])
+async getDiff(file: P4File | string): Promise<P4DiffResult> {
+    const depotPath = typeof file === 'string' ? file : file.depotFile
+    const clientPath = typeof file === 'string' ? null : file.clientFile
 
-      // Get the have revision content
+    try {
+      const diffOutput = await this.runCommand(['diff', '-du', `"${depotPath}"`])
+
       let oldContent = ''
       try {
-        oldContent = await this.runCommand(['print', '-q', `"${filePath}#have"`])
+        oldContent = await this.runCommand(['print', '-q', `"${depotPath}#have"`])
       } catch {
-        // File might be newly added
       }
 
-      // Read current file content
       let newContent = ''
       try {
-        const fs = await import('fs/promises')
-        newContent = await fs.readFile(filePath.replace(/\//g, '\\'), 'utf8')
-      } catch {
-        // Might be deleted
+        if (clientPath && clientPath.trim() !== '') {
+          const fs = await import('fs/promises')
+          const normalizedPath = clientPath.replace(/\//g, '\\')
+          newContent = await fs.readFile(normalizedPath, 'utf8')
+        } else {
+          newContent = await this.runCommand(['print', '-q', `"${depotPath}"`])
+        }
+      } catch (err) {
+        console.error('Local file read failed, falling back to P4 print:', err)
+        newContent = await this.runCommand(['print', '-q', `"${depotPath}"`])
       }
 
       return {
-        filePath,
+        filePath: depotPath,
         oldContent,
         newContent,
         hunks: diffOutput
       }
     } catch (error: any) {
-      // If no diff (file unchanged), return empty
       if (error.message?.includes('not opened') || error.message?.includes('no differing files')) {
         return {
-          filePath,
+          filePath: depotPath,
           oldContent: '',
           newContent: '',
           hunks: ''
@@ -1116,7 +1085,9 @@ export class P4Service {
       const stream = await this.getClientStream()
       if (stream) {
         const match = stream.match(/^\/\/([^/]+)/)
-      return match ? match[1] : null
+        return match ? match[1] : null
+      }
+      return null
     } catch {
       return null
     }
