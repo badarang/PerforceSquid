@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useMemo } from 'react'
+import { SquidIcon } from './SquidIcon'
 
 interface Stream {
   stream: string
@@ -229,7 +230,10 @@ export function StreamSelector({ currentStream, onStreamChange }: StreamSelector
 
           <div className="max-h-80 overflow-y-auto">
             {loading ? (
-              <div className="px-3 py-4 text-sm text-gray-500 text-center">Loading streams...</div>
+              <div className="px-3 py-4 text-sm text-gray-500 text-center">
+                <SquidIcon className="w-8 h-8 mx-auto mb-2 animate-doom-chit" />
+                Loading streams...
+              </div>
             ) : streams.length === 0 ? (
               <div className="px-3 py-4 text-sm text-gray-500 text-center">No streams found<div className="text-xs mt-1">(Classic depot?)</div></div>
             ) : (

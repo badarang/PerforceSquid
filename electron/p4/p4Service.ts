@@ -1,5 +1,6 @@
 import { exec, spawn } from 'child_process'
 import { promisify } from 'util'
+import { promises as fs } from 'fs'
 import type { P4Info, P4File, P4Changelist, P4DiffResult, P4Stream, P4Workspace, P4Depot, StreamRelation, StreamType } from './types'
 
 const execAsync = promisify(exec)
@@ -254,57 +255,41 @@ export class P4Service {
 
   async getOpenedFiles(): Promise<P4File[]> {
     try {
-      // Use //... to get all opened files in the client
-      const output = await this.runCommand(['opened', '//...'])
+      // Use -ztag without -Mj for maximum compatibility and robustness
+      const output = await this.runCommand(['-ztag', 'opened', '//...'])
       if (!output.trim()) {
         return []
       }
 
       const files: P4File[] = []
-      const lines = output.trim().split('\n')
-
+      const lines = output.replace(/\r\n/g, '\n').split('\n')
+      
+      let currentFile: any = {}
+      
       for (const line of lines) {
-        // Format for default changelist: //depot/path/file.ext#rev - action default change (type)
-        // Format for numbered changelist: //depot/path/file.ext#rev - action change 12345 (type)
-        const defaultMatch = line.match(/^(.+?)#(\d+) - (\w+(?:\/\w+)?) default change(?: \((.+?)\))?/)
-        const numberedMatch = line.match(/^(.+?)#(\d+) - (\w+(?:\/\w+)?) change (\d+)(?: \((.+?)\))?/)
-
-        if (defaultMatch) {
-          const [, depotFile, , action, type] = defaultMatch
-          files.push({
-            depotFile: depotFile.trim(),
-            clientFile: '',
-            action: action as P4File['action'],
-            changelist: 'default',
-            type: type || 'text'
-          })
-        } else if (numberedMatch) {
-          const [, depotFile, , action, changelist, type] = numberedMatch
-          files.push({
-            depotFile: depotFile.trim(),
-            clientFile: '',
-            action: action as P4File['action'],
-            changelist: parseInt(changelist, 10),
-            type: type || 'text'
-          })
+        // Parse ztag line: "... key value"
+        const match = line.match(/^\.\.\. ([a-zA-Z0-9]+) (.*)$/)
+        if (!match) continue
+        
+        const key = match[1]
+        const value = match[2].trim()
+        
+        if (key === 'depotFile') {
+          // If we have a previous file, push it
+          if (currentFile.depotFile) {
+            files.push(this.mapZtagToFile(currentFile))
+          }
+          // Start new file
+          currentFile = { depotFile: value }
+        } else {
+          // Add property to current file
+          currentFile[key] = value
         }
       }
-
-      // Get client file paths
-      if (files.length > 0) {
-        try {
-          const whereOutput = await this.runCommand(['where', ...files.map(f => f.depotFile)])
-          const whereLines = whereOutput.trim().split('\n')
-
-          for (let i = 0; i < whereLines.length && i < files.length; i++) {
-            const parts = whereLines[i].split(' ')
-            if (parts.length >= 3) {
-              files[i].clientFile = parts[2]
-            }
-          }
-        } catch {
-          // If where fails, just use depot paths
-        }
+      
+      // Push the last file
+      if (currentFile.depotFile) {
+        files.push(this.mapZtagToFile(currentFile))
       }
 
       return files
@@ -316,15 +301,26 @@ export class P4Service {
     }
   }
 
+  private mapZtagToFile(data: any): P4File {
+    const changelist = data.change === 'default' ? 'default' : parseInt(data.change, 10)
+    return {
+      depotFile: data.depotFile,
+      clientFile: data.clientFile || '',
+      action: (data.action || 'edit') as P4File['action'],
+      changelist: isNaN(changelist as number) && changelist !== 'default' ? 'default' : changelist,
+      type: data.type || 'text'
+    }
+  }
+
   async getDiff(filePath: string): Promise<P4DiffResult> {
     try {
       // Get the diff output
-      const diffOutput = await this.runCommand(['diff', '-du', filePath])
+      const diffOutput = await this.runCommand(['diff', '-du', `"${filePath}"`])
 
       // Get the have revision content
       let oldContent = ''
       try {
-        oldContent = await this.runCommand(['print', '-q', `${filePath}#have`])
+        oldContent = await this.runCommand(['print', '-q', `"${filePath}#have"`])
       } catch {
         // File might be newly added
       }
@@ -464,6 +460,52 @@ export class P4Service {
     }
   }
 
+  // Edit an existing changelist's description
+  async editChangelist(changelist: number, description: string): Promise<{ success: boolean; message: string }> {
+    try {
+      // Get current spec
+      const spec = await this.runCommand(['change', '-o', String(changelist)])
+      
+      // Update description
+      // Description is strictly indented.
+      // We'll use a safer replacement strategy: replace everything after 'Description:' until 'Files:' or end
+      
+      const lines = spec.split('\n')
+      const newLines: string[] = []
+      let skip = false
+      
+      for (const line of lines) {
+        if (line.startsWith('Description:')) {
+          newLines.push('Description:')
+          // Add new description indented
+          const descLines = description.trim().split('\n')
+          for (const d of descLines) {
+            newLines.push(`\t${d}`)
+          }
+          skip = true
+        } else if (line.startsWith('Files:') || line.startsWith('Jobs:') || (skip && /^[^\t]/.test(line) && line.trim() !== '')) {
+          skip = false
+          newLines.push(line)
+        } else if (!skip) {
+          newLines.push(line)
+        }
+      }
+      
+      const newSpec = newLines.join('\n')
+      const output = await this.runCommand(['change', '-i'], newSpec)
+      
+      return {
+        success: true,
+        message: output
+      }
+    } catch (error: any) {
+      return {
+        success: false,
+        message: error.message
+      }
+    }
+  }
+
   // Find or create a "Junk" changelist
   async getOrCreateJunkChangelist(): Promise<{ success: boolean; changelistNumber: number; message: string }> {
     try {
@@ -499,7 +541,7 @@ export class P4Service {
     try {
       const args = ['sync']
       if (filePath) {
-        args.push(filePath)
+        args.push(`"${filePath}"`)
       }
       const output = await this.runCommand(args)
       return {
@@ -516,7 +558,56 @@ export class P4Service {
 
   async revert(files: string[]): Promise<{ success: boolean; message: string }> {
     try {
-      const output = await this.runCommand(['revert', ...files])
+      // Quote files to handle spaces
+      const quotedFiles = files.map(f => `"${f}"`)
+      
+      // Check for files opened for 'add' that need to be deleted physically after revert
+      const filesToDelete: string[] = []
+      try {
+        const fstatOutput = await this.runCommand(['fstat', '-T', 'clientFile,action', ...quotedFiles])
+        
+        const lines = fstatOutput.split('\n')
+        let currentBlock: { clientFile?: string, action?: string } = {}
+        
+        for (const line of lines) {
+          const trimmed = line.trim()
+          if (!trimmed) {
+            if (currentBlock.clientFile && currentBlock.action === 'add') {
+              filesToDelete.push(currentBlock.clientFile)
+            }
+            currentBlock = {}
+            continue
+          }
+          
+          if (trimmed.startsWith('... clientFile ')) {
+            currentBlock.clientFile = trimmed.substring(15).trim()
+          } else if (trimmed.startsWith('... action ')) {
+            currentBlock.action = trimmed.substring(11).trim()
+          }
+        }
+        // Process last block
+        if (currentBlock.clientFile && currentBlock.action === 'add') {
+          filesToDelete.push(currentBlock.clientFile)
+        }
+      } catch (err) {
+        // Ignore fstat errors (e.g. if file is not opened)
+      }
+
+      const output = await this.runCommand(['revert', ...quotedFiles])
+
+      // Cleanup files that were 'add'ed
+      if (filesToDelete.length > 0) {
+        for (const file of filesToDelete) {
+          try {
+            await fs.unlink(file)
+          } catch (e: any) {
+            if (e.code !== 'ENOENT') {
+              console.error(`Failed to delete reverted file: ${file}`, e)
+            }
+          }
+        }
+      }
+
       return {
         success: true,
         message: output
@@ -719,7 +810,9 @@ export class P4Service {
   async reopenFiles(files: string[], changelist: number | 'default'): Promise<{ success: boolean; message: string }> {
     try {
       const clArg = changelist === 'default' || changelist === 0 ? 'default' : String(changelist)
-      const output = await this.runCommand(['reopen', '-c', clArg, ...files])
+      // Quote files to handle spaces
+      const quotedFiles = files.map(f => `"${f}"`)
+      const output = await this.runCommand(['reopen', '-c', clArg, ...quotedFiles])
       return {
         success: true,
         message: output
@@ -972,10 +1065,24 @@ export class P4Service {
       const stream = await this.getClientStream()
       if (stream) {
         const match = stream.match(/^\/\/([^/]+)/)
-        return match ? match[1] : null
+      return match ? match[1] : null
+    } catch {
+      return null
+    }
+  }
+
+  // Get Swarm URL from P4 properties
+  async getSwarmUrl(): Promise<string | null> {
+    try {
+      // Try to get P4.Swarm.URL property
+      const output = await this.runCommand(['property', '-l', '-n', 'P4.Swarm.URL'])
+      // Output format: P4.Swarm.URL = https://swarm.myserver.com
+      const match = output.match(/P4\.Swarm\.URL\s*=\s*(\S+)/)
+      if (match) {
+        return match[1]
       }
       return null
-    } catch {
+    } catch (error) {
       return null
     }
   }

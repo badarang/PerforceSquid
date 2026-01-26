@@ -32,6 +32,7 @@ export function FileList() {
     checkedFiles,
     toggleFileCheck,
     setAllFilesChecked,
+    setCheckedList,
     refresh,
     clearSelection
   } = useP4Store()
@@ -39,6 +40,7 @@ export function FileList() {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; file: typeof files[0] } | null>(null)
   const [isProcessing, setIsProcessing] = useState(false)
   const [showMoveToMenu, setShowMoveToMenu] = useState(false)
+  const [lastClickedIndex, setLastClickedIndex] = useState<number | null>(null)
 
   const filteredFiles = files.filter(file => {
     if (selectedChangelist === 'default') {
@@ -75,8 +77,48 @@ export function FileList() {
     e.dataTransfer.effectAllowed = 'move'
   }
 
+  const handleFileClick = (e: React.MouseEvent, file: typeof files[0], index: number) => {
+    if (e.shiftKey && lastClickedIndex !== null) {
+      // Range selection
+      const start = Math.min(lastClickedIndex, index)
+      const end = Math.max(lastClickedIndex, index)
+      
+      const filesInRange = filteredFiles.slice(start, end + 1)
+      const newCheckedPaths = filesInRange.map(f => f.depotFile)
+      
+      // Merge with existing checked files? 
+      // Standard behavior: Shift+Click defines the selection.
+      // We'll replace the selection with the range for clarity, or add to it?
+      // "Checkbox" lists often Add. "Highlight" lists Replace.
+      // Let's Replace to be consistent with "Selecting a range".
+      // But if the user Ctrl+Clicks, we don't handle that yet.
+      // Let's just set the checked list to the range.
+      setCheckedList(newCheckedPaths)
+    } else {
+      // Single click
+      setLastClickedIndex(index)
+      fetchDiff(file)
+      // Optional: Do we want single click to Select (Check) the file?
+      // The user wants "Shift+Click" to work. Usually this implies the anchor was set by a Click.
+      // If Click doesn't check, does it set the anchor? Yes.
+      // But if Click doesn't check, and Shift+Click Checks, then we have a mixed mode.
+      // Use case: Click A (Diffs A). Shift+Click B (Checks A..B).
+      // This seems useful.
+    }
+  }
+
   const handleContextMenu = (e: React.MouseEvent, file: typeof files[0]) => {
     e.preventDefault()
+    
+    // If right-clicked file is NOT in the checked set, select it exclusively
+    if (!checkedFiles.has(file.depotFile)) {
+      setCheckedList([file.depotFile])
+      fetchDiff(file) // Also view it
+      // Also update last clicked index?
+      const index = filteredFiles.findIndex(f => f.depotFile === file.depotFile)
+      if (index !== -1) setLastClickedIndex(index)
+    }
+    
     setContextMenu({ x: e.clientX, y: e.clientY, file })
   }
 
@@ -84,7 +126,7 @@ export function FileList() {
     if (!contextMenu) return
 
     const file = contextMenu.file
-    const filePath = file.clientFile || file.depotFile
+    const filePath = file.depotFile
 
     if (!confirm(`Revert "${getFileName(filePath)}"? This cannot be undone.`)) {
       setContextMenu(null)
@@ -128,7 +170,7 @@ export function FileList() {
   const handleRevertSelected = async () => {
     const selectedFiles = filteredFiles
       .filter(f => checkedFiles.has(f.depotFile))
-      .map(f => f.clientFile || f.depotFile)
+      .map(f => f.depotFile)
 
     if (selectedFiles.length === 0) {
       toast?.showToast({
@@ -322,10 +364,11 @@ export function FileList() {
                   draggable
                   onDragStart={(e) => handleDragStart(e, file)}
                   onContextMenu={(e) => handleContextMenu(e, file)}
+                  onClick={(e) => handleFileClick(e, file, index)}
                   className={`
                     flex items-center gap-2 px-3 py-2 cursor-pointer
                     hover:bg-gray-800 transition-colors
-                    ${isSelected ? 'bg-gray-700' : ''}
+                    ${isSelected ? 'bg-gray-700' : isChecked ? 'bg-gray-800' : ''}
                   `}
                 >
                   <input
@@ -334,13 +377,13 @@ export function FileList() {
                     onChange={(e) => {
                       e.stopPropagation()
                       toggleFileCheck(file.depotFile)
+                      setLastClickedIndex(index) // Also update anchor on checkbox click
                     }}
                     onClick={(e) => e.stopPropagation()}
                     className="w-4 h-4 rounded border-gray-600 bg-gray-700 text-p4-blue focus:ring-p4-blue focus:ring-offset-0"
                   />
                   <div
                     className="flex items-center gap-2 flex-1 min-w-0"
-                    onClick={() => fetchDiff(file)}
                   >
                     <span className={`font-mono text-sm ${actionColors[file.action] || 'text-gray-400'}`}>
                       {actionIcons[file.action] || '?'}

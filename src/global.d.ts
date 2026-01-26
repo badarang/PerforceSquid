@@ -37,8 +37,10 @@ interface P4Api {
   getClientStream: () => Promise<string | null>
   switchStream: (streamPath: string) => Promise<{ success: boolean; message: string }>
   getCurrentDepot: () => Promise<string | null>
+  getSwarmUrl: () => Promise<string | null>
   reopenFiles: (files: string[], changelist: number | 'default') => Promise<{ success: boolean; message: string }>
   createChangelist: (description: string) => Promise<{ success: boolean; changelistNumber: number; message: string }>
+  editChangelist: (changelist: number, description: string) => Promise<{ success: boolean; message: string }>
   deleteChangelist: (changelist: number) => Promise<{ success: boolean; message: string }>
   revertAndDeleteChangelist: (changelist: number) => Promise<{ success: boolean; message: string }>
   getOrCreateJunkChangelist: () => Promise<{ success: boolean; changelistNumber: number; message: string }>

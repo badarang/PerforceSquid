@@ -24,6 +24,8 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
   
   // Workspace Settings
   const [workspace, setWorkspace] = useState<P4Workspace | null>(null)
+  const [serverAddress, setServerAddress] = useState('')
+  const [userName, setUserName] = useState('')
   const [editedRoot, setEditedRoot] = useState('')
   const [isSaving, setIsSaving] = useState(false)
   const [statusMessage, setStatusMessage] = useState<{ type: 'success' | 'error', text: string } | null>(null)
@@ -35,6 +37,7 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
       // Reset state when closed
       setStatusMessage(null)
       setWorkspace(null)
+      setServerAddress('')
     }
   }, [isOpen])
 
@@ -44,6 +47,13 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
       // Load app settings
       const enabled = await window.settings.getAutoLaunch()
       setAutoLaunch(enabled)
+
+      // Get Info for Server Address
+      const info = await window.p4.getInfo()
+      if (info) {
+        if (info.serverAddress) setServerAddress(info.serverAddress)
+        if (info.userName) setUserName(info.userName)
+      }
 
       // Load workspace settings
       const clientName = await window.p4.getClient()
@@ -172,12 +182,20 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
                   <div className="bg-gray-800/30 rounded border border-gray-700/50 p-4 space-y-4">
                     <div className="grid grid-cols-2 gap-4 text-sm text-gray-400 mb-2">
                        <div>
-                         <span className="block text-xs text-gray-500 uppercase">Name</span>
-                         <span className="text-white">{workspace.client}</span>
+                         <span className="block text-xs text-gray-500 uppercase">User</span>
+                         <span className="text-white">{userName || 'Unknown'}</span>
+                       </div>
+                       <div className="min-w-0">
+                         <span className="block text-xs text-gray-500 uppercase">Server</span>
+                         <span className="block text-white truncate" title={serverAddress}>{serverAddress || 'Unknown'}</span>
                        </div>
                        <div>
+                         <span className="block text-xs text-gray-500 uppercase">Workspace</span>
+                         <span className="text-white">{workspace.client}</span>
+                       </div>
+                       <div className="min-w-0">
                          <span className="block text-xs text-gray-500 uppercase">Stream</span>
-                         <span className="text-white truncate" title={workspace.stream}>{workspace.stream || 'None'}</span>
+                         <span className="block text-white truncate" title={workspace.stream}>{workspace.stream || 'None'}</span>
                        </div>
                     </div>
 

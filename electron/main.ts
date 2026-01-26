@@ -4,13 +4,29 @@ import { P4Service } from './p4/p4Service'
 
 let mainWindow: BrowserWindow | null = null
 const p4Service = new P4Service()
+import fs from 'fs'
 
 function createWindow() {
   const isDev = process.env.VITE_DEV_SERVER_URL;
   
+  // Restore window state
+  let windowState = { width: 1280, height: 720, x: undefined, y: undefined }
+  const statePath = path.join(app.getPath('userData'), 'window-state.json')
+  
+  try {
+    if (fs.existsSync(statePath)) {
+      const savedState = JSON.parse(fs.readFileSync(statePath, 'utf8'))
+      windowState = { ...windowState, ...savedState }
+    }
+  } catch (e) {
+    // Ignore error
+  }
+
   mainWindow = new BrowserWindow({
-    width: 1280,
-    height: 720,
+    width: windowState.width,
+    height: windowState.height,
+    x: windowState.x,
+    y: windowState.y,
     minWidth: 800,
     minHeight: 600,
     icon: path.join(isDev ? process.cwd() : process.resourcesPath, 'build/icon.png'),
@@ -24,9 +40,18 @@ function createWindow() {
     show: false
   })
 
-  mainWindow.once('ready-to-show', () => {
-    mainWindow?.show()
+  // Save window state on close
+  mainWindow.on('close', () => {
+    if (!mainWindow) return
+    const bounds = mainWindow.getBounds()
+    try {
+      fs.writeFileSync(statePath, JSON.stringify(bounds))
+    } catch (e) {
+      // Ignore
+    }
   })
+
+  mainWindow.once('ready-to-show', () => {
 
   if (process.env.VITE_DEV_SERVER_URL) {
     mainWindow.loadURL(process.env.VITE_DEV_SERVER_URL)
@@ -132,12 +157,20 @@ ipcMain.handle('p4:getCurrentDepot', async () => {
   return p4Service.getCurrentDepot()
 })
 
+ipcMain.handle('p4:getSwarmUrl', async () => {
+  return p4Service.getSwarmUrl()
+})
+
 ipcMain.handle('p4:reopenFiles', async (_, files: string[], changelist: number | 'default') => {
   return p4Service.reopenFiles(files, changelist)
 })
 
 ipcMain.handle('p4:createChangelist', async (_, description: string) => {
   return p4Service.createChangelist(description)
+})
+
+ipcMain.handle('p4:editChangelist', async (_, changelist: number, description: string) => {
+  return p4Service.editChangelist(changelist, description)
 })
 
 ipcMain.handle('p4:deleteChangelist', async (_, changelist: number) => {

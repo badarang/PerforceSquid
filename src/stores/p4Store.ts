@@ -56,6 +56,7 @@ interface P4Store {
   setError: (error: string | null) => void
   toggleFileCheck: (depotPath: string) => void
   setAllFilesChecked: (checked: boolean) => void
+  setCheckedList: (depotPaths: string[]) => void
   setSubmitDescription: (desc: string) => void
   clearSelection: () => void
 
@@ -129,6 +130,7 @@ export const useP4Store = create<P4Store>((set, get) => ({
     }
     return { checkedFiles: new Set() }
   }),
+  setCheckedList: (depotPaths) => set({ checkedFiles: new Set(depotPaths) }),
   setSubmitDescription: (desc) => set({ submitDescription: desc }),
   clearSelection: () => set({ selectedFile: null, currentDiff: null }),
 

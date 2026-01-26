@@ -23,10 +23,13 @@ const p4Api = {
   getClientStream: () => ipcRenderer.invoke('p4:getClientStream'),
   switchStream: (streamPath: string) => ipcRenderer.invoke('p4:switchStream', streamPath),
   getCurrentDepot: () => ipcRenderer.invoke('p4:getCurrentDepot'),
+  getSwarmUrl: () => ipcRenderer.invoke('p4:getSwarmUrl'),
   reopenFiles: (files: string[], changelist: number | 'default') =>
     ipcRenderer.invoke('p4:reopenFiles', files, changelist),
   createChangelist: (description: string) =>
     ipcRenderer.invoke('p4:createChangelist', description),
+  editChangelist: (changelist: number, description: string) =>
+    ipcRenderer.invoke('p4:editChangelist', changelist, description),
   deleteChangelist: (changelist: number) =>
     ipcRenderer.invoke('p4:deleteChangelist', changelist),
   revertAndDeleteChangelist: (changelist: number) =>

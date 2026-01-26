@@ -14,6 +14,17 @@ export default {
         'p4-green': '#2ea043',
         'p4-red': '#f85149',
         'p4-yellow': '#d29922',
+      },
+      keyframes: {
+        'doom-chit': {
+          '0%, 100%': { transform: 'scale(1, 1) rotate(0deg)' },
+          '25%': { transform: 'scale(1.3, 0.7) rotate(-15deg)' },
+          '50%': { transform: 'scale(0.7, 1.3) rotate(0deg)' },
+          '75%': { transform: 'scale(1.3, 0.7) rotate(15deg)' },
+        }
+      },
+      animation: {
+        'doom-chit': 'doom-chit 1s ease-in-out infinite',
       }
     },
   },

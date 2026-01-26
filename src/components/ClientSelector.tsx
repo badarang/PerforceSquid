@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import { SquidIcon } from './SquidIcon'
 
 interface P4Client {
   name: string
@@ -19,6 +20,7 @@ interface P4Stream {
   parent: string
   type: string
   depotName: string
+  description: string
 }
 
 interface ClientSelectorProps {
@@ -249,6 +251,7 @@ export function ClientSelector({ onClientSelected }: ClientSelectorProps) {
     return (
       <div className="h-screen bg-p4-dark flex items-center justify-center">
         <div className="text-center">
+          <SquidIcon className="w-20 h-20 mx-auto mb-4 animate-doom-chit" />
           <div className="text-xl text-gray-300 mb-2">Loading workspaces...</div>
           <div className="text-sm text-gray-500">Please wait</div>
         </div>
