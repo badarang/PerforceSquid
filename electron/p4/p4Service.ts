@@ -25,39 +25,30 @@ export class P4Service {
   private async runCommand(args: string[], stdinInput?: string): Promise<string> {
     try {
       const clientArgs = this.currentClient ? ['-c', this.currentClient] : []
+      const allArgs = [...clientArgs, ...args]
 
-      if (stdinInput) {
-        // Use spawn for stdin input
-        return new Promise((resolve, reject) => {
-          const allArgs = [...clientArgs, ...args]
-          const proc = spawn('p4', allArgs, { shell: true })
-          let stdout = ''
-          let stderr = ''
+      return new Promise((resolve, reject) => {
+        // Use spawn for all commands to avoid maxBuffer limits
+        const proc = spawn('p4', allArgs, { shell: true })
+        let stdout = ''
+        let stderr = ''
 
-          proc.stdout.on('data', (data) => { stdout += data.toString() })
-          proc.stderr.on('data', (data) => { stderr += data.toString() })
+        proc.stdout.on('data', (data) => { stdout += data.toString() })
+        proc.stderr.on('data', (data) => { stderr += data.toString() })
 
-          proc.on('close', (code) => {
-            if (code === 0 || stdout) {
-              resolve(stdout)
-            } else {
-              reject(new Error(stderr || `Command failed with code ${code}`))
-            }
-          })
+        proc.on('close', (code) => {
+          if (code === 0 || stdout) {
+            resolve(stdout)
+          } else {
+            reject(new Error(stderr || `Command failed with code ${code}`))
+          }
+        })
 
+        if (stdinInput) {
           proc.stdin.write(stdinInput)
           proc.stdin.end()
-        })
-      }
-
-      const { stdout, stderr } = await execAsync(`p4 ${clientArgs.join(' ')} ${args.join(' ')}`, {
-        maxBuffer: 1024 * 1024 * 10, // 10MB buffer
-        encoding: 'utf8'
+        }
       })
-      if (stderr && !stdout) {
-        throw new Error(stderr)
-      }
-      return stdout
     } catch (error: any) {
       if (error.stdout) {
         return error.stdout
@@ -257,39 +248,71 @@ export class P4Service {
     try {
       // Use -ztag without -Mj for maximum compatibility and robustness
       const output = await this.runCommand(['-ztag', 'opened', '//...'])
+      
+      // DEBUG: Write raw output to file
+      try {
+        await fs.writeFile('debug_raw_output.txt', output)
+      } catch (e) { console.error('Failed to write debug log', e) }
+
       if (!output.trim()) {
         return []
       }
 
       const files: P4File[] = []
-      const lines = output.replace(/\r\n/g, '\n').split('\n')
+      // Robust splitting: handle \r\n, \r, and \n
+      const lines = output.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n')
       
       let currentFile: any = {}
       
-      for (const line of lines) {
-        // Parse ztag line: "... key value"
-        const match = line.match(/^\.\.\. ([a-zA-Z0-9]+) (.*)$/)
-        if (!match) continue
-        
-        const key = match[1]
-        const value = match[2].trim()
-        
-        if (key === 'depotFile') {
-          // If we have a previous file, push it
-          if (currentFile.depotFile) {
-            files.push(this.mapZtagToFile(currentFile))
-          }
-          // Start new file
-          currentFile = { depotFile: value }
-        } else {
-          // Add property to current file
-          currentFile[key] = value
+      const pushCurrentFile = () => {
+        if (currentFile.depotFile) {
+          files.push(this.mapZtagToFile(currentFile))
         }
+        currentFile = {}
+      }
+
+      for (const line of lines) {
+        const trimmed = line.trim()
+        
+        // Blank line usually separates records in -Ztag output
+        if (!trimmed) {
+          pushCurrentFile()
+          continue
+        }
+
+        // Parse ztag line manually: "... key value"
+        // Regex can be flaky with some encodings or characters, using strict string parsing
+        if (!line.startsWith('... ')) continue
+        
+        // Find end of key (first space after '... ')
+        const keyStart = 4 // length of "... "
+        const keyEnd = line.indexOf(' ', keyStart)
+        
+        if (keyEnd === -1) continue // Invalid format
+        
+        const key = line.substring(keyStart, keyEnd)
+        const value = line.substring(keyEnd + 1).trim()
+        
+        // Safety check: if we see depotFile and we already have one, it's a new record
+        if (key === 'depotFile' && currentFile.depotFile) {
+          pushCurrentFile()
+        }
+
+        currentFile[key] = value
       }
       
       // Push the last file
-      if (currentFile.depotFile) {
-        files.push(this.mapZtagToFile(currentFile))
+      pushCurrentFile()
+      
+      // DEBUG: Write parsed files to file
+      try {
+        await fs.writeFile('debug_parsed_files.txt', JSON.stringify(files, null, 2))
+      } catch (e) { console.error('Failed to write debug parsed log', e) }
+
+      // Debug logging to help identify parsing issues
+      console.log(`Parsed ${files.length} opened files`)
+      if (files.length > 0) {
+          console.log('First file sample:', JSON.stringify(files[0]))
       }
 
       return files
@@ -566,7 +589,7 @@ export class P4Service {
       try {
         const fstatOutput = await this.runCommand(['fstat', '-T', 'clientFile,action', ...quotedFiles])
         
-        const lines = fstatOutput.split('\n')
+        const lines = fstatOutput.replace(/\r/g, '').split('\n')
         let currentBlock: { clientFile?: string, action?: string } = {}
         
         for (const line of lines) {
@@ -591,18 +614,46 @@ export class P4Service {
         }
       } catch (err) {
         // Ignore fstat errors (e.g. if file is not opened)
+        console.warn('fstat failed during revert check:', err)
       }
 
       const output = await this.runCommand(['revert', ...quotedFiles])
 
       // Cleanup files that were 'add'ed
       if (filesToDelete.length > 0) {
+        const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
+
         for (const file of filesToDelete) {
-          try {
-            await fs.unlink(file)
-          } catch (e: any) {
-            if (e.code !== 'ENOENT') {
-              console.error(`Failed to delete reverted file: ${file}`, e)
+          let deleted = false
+          let lastError: any = null
+          
+          // Retry logic for file deletion (e.g. if locked by Unity)
+          for (let i = 0; i < 5; i++) {
+            try {
+              await fs.unlink(file)
+              deleted = true
+              break
+            } catch (e: any) {
+              lastError = e
+              if (e.code === 'ENOENT') {
+                deleted = true // Already gone
+                break
+              }
+              // Wait and retry
+              await sleep(100 * (i + 1))
+            }
+          }
+          
+          if (!deleted) {
+            console.error(`Failed to delete reverted file after retries: ${file}`, lastError)
+          } else {
+            // Success - also try to cleanup associated .meta file (Unity)
+            if (!file.endsWith('.meta')) {
+              try {
+                await fs.unlink(file + '.meta')
+              } catch (e) {
+                // Ignore .meta deletion errors (it might not exist or handled separately)
+              }
             }
           }
         }
