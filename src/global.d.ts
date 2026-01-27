@@ -26,8 +26,9 @@ interface P4Api {
   sync: (filePath?: string) => Promise<{ success: boolean; message: string }>
   revert: (files: string[]) => Promise<{ success: boolean; message: string }>
   revertUnchanged: () => Promise<{ success: boolean; message: string; revertedCount: number }>
-  shelve: (changelist: number) => Promise<{ success: boolean; message: string }>
-  unshelve: (changelist: number) => Promise<{ success: boolean; message: string }>
+  shelve: (changelist: number, files?: string[]) => Promise<{ success: boolean; message: string }>
+  unshelve: (changelist: number, files?: string[]) => Promise<{ success: boolean; message: string }>
+  deleteShelve: (changelist: number, files?: string[]) => Promise<{ success: boolean; message: string }>
   getSubmittedChanges: (depotPath: string, maxChanges?: number) => Promise<P4Changelist[]>
   describeChangelist: (changelist: number) => Promise<{
     info: P4Changelist | null
@@ -66,7 +67,7 @@ interface P4Api {
   getWorkspaceDetails: (clientName: string) => Promise<P4Workspace | null>
   getStreamGraphData: (depot: string) => Promise<StreamGraphData>
   getInterchanges: (fromStream: string, toStream: string) => Promise<StreamRelation>
-  openDiffWindow: (file: P4File) => Promise<void>
+  openDiffWindow: (file: P4File, mode?: string) => Promise<void>
 }
 
 interface SettingsApi {

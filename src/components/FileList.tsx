@@ -33,14 +33,21 @@ export function FileList() {
     toggleFileCheck,
     setAllFilesChecked,
     setCheckedList,
+    setSelectedChangelist,
     refresh,
-    clearSelection
+    clearSelection,
+    setLoading,
+    setFiles
   } = useP4Store()
   const toast = useToastContext()
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; file: typeof files[0] } | null>(null)
   const [isProcessing, setIsProcessing] = useState(false)
   const [showMoveToMenu, setShowMoveToMenu] = useState(false)
   const [lastClickedIndex, setLastClickedIndex] = useState<number | null>(null)
+  
+  // Grouping state
+  const [isShelvedExpanded, setShelvedExpanded] = useState(true)
+  const [lastClickedSource, setLastClickedSource] = useState<'shelved' | 'opened' | null>(null)
 
   const filteredFiles = files.filter(file => {
     if (selectedChangelist === 'default') {
@@ -48,6 +55,9 @@ export function FileList() {
     }
     return file.changelist === selectedChangelist
   })
+  
+  const shelvedFiles = filteredFiles.filter(f => f.status === 'shelved')
+  const openedFiles = filteredFiles.filter(f => f.status !== 'shelved')
 
   const checkedCount = filteredFiles.filter(f => checkedFiles.has(f.depotFile)).length
   const allChecked = filteredFiles.length > 0 && checkedCount === filteredFiles.length
@@ -78,33 +88,22 @@ export function FileList() {
     e.dataTransfer.effectAllowed = 'move'
   }
 
-  const handleFileClick = (e: React.MouseEvent, file: typeof files[0], index: number) => {
-    if (e.shiftKey && lastClickedIndex !== null) {
-      // Range selection
+  const handleFileClick = (e: React.MouseEvent, file: typeof files[0], index: number, source: 'shelved' | 'opened') => {
+    if (e.shiftKey && lastClickedIndex !== null && lastClickedSource === source) {
+      // Range selection within same group
+      const sourceList = source === 'shelved' ? shelvedFiles : openedFiles
       const start = Math.min(lastClickedIndex, index)
       const end = Math.max(lastClickedIndex, index)
       
-      const filesInRange = filteredFiles.slice(start, end + 1)
+      const filesInRange = sourceList.slice(start, end + 1)
       const newCheckedPaths = filesInRange.map(f => f.depotFile)
       
-      // Merge with existing checked files? 
-      // Standard behavior: Shift+Click defines the selection.
-      // We'll replace the selection with the range for clarity, or add to it?
-      // "Checkbox" lists often Add. "Highlight" lists Replace.
-      // Let's Replace to be consistent with "Selecting a range".
-      // But if the user Ctrl+Clicks, we don't handle that yet.
-      // Let's just set the checked list to the range.
       setCheckedList(newCheckedPaths)
     } else {
       // Single click
       setLastClickedIndex(index)
+      setLastClickedSource(source)
       fetchDiff(file)
-      // Optional: Do we want single click to Select (Check) the file?
-      // The user wants "Shift+Click" to work. Usually this implies the anchor was set by a Click.
-      // If Click doesn't check, does it set the anchor? Yes.
-      // But if Click doesn't check, and Shift+Click Checks, then we have a mixed mode.
-      // Use case: Click A (Diffs A). Shift+Click B (Checks A..B).
-      // This seems useful.
     }
   }
 
@@ -115,9 +114,14 @@ export function FileList() {
     if (!checkedFiles.has(file.depotFile)) {
       setCheckedList([file.depotFile])
       fetchDiff(file) // Also view it
-      // Also update last clicked index?
-      const index = filteredFiles.findIndex(f => f.depotFile === file.depotFile)
-      if (index !== -1) setLastClickedIndex(index)
+      
+      const source = file.status === 'shelved' ? 'shelved' : 'opened'
+      const sourceList = source === 'shelved' ? shelvedFiles : openedFiles
+      const index = sourceList.findIndex(f => f.depotFile === file.depotFile)
+      if (index !== -1) {
+        setLastClickedIndex(index)
+        setLastClickedSource(source)
+      }
     }
     
     setContextMenu({ x: e.clientX, y: e.clientY, file })
@@ -325,11 +329,308 @@ export function FileList() {
     }
   }
 
+  const handleShelve = async () => {
+    if (!contextMenu) return
+
+    const selectedFiles = filteredFiles
+      .filter(f => checkedFiles.has(f.depotFile) && f.status !== 'shelved')
+      .map(f => f.depotFile)
+
+    if (selectedFiles.length === 0) return
+
+    // Clear selection immediately to hide the "revert" process from DiffViewer
+    clearSelection()
+    setIsProcessing(true)
+    setLoading(true)
+    setContextMenu(null)
+
+    try {
+      let clNumber = contextMenu.file.changelist === 'default' ? 0 : contextMenu.file.changelist
+      
+      // If trying to shelve to default changelist (0), we must create a new changelist first
+      if (clNumber === 0) {
+        if (!confirm('Cannot shelve to Default changelist. Create a new changelist and shelve?')) {
+          setIsProcessing(false)
+          setLoading(false)
+          return
+        }
+
+        const createResult = await window.p4.createChangelist('Shelved files')
+        if (!createResult.success) {
+          throw new Error(createResult.message)
+        }
+        
+        clNumber = createResult.changelistNumber
+        
+        // Move files to the new changelist
+        const moveResult = await window.p4.reopenFiles(selectedFiles, clNumber)
+        if (!moveResult.success) {
+          throw new Error('Failed to move files to new changelist: ' + moveResult.message)
+        }
+
+        // Switch view to the new changelist
+        setSelectedChangelist(clNumber)
+      }
+
+      if (typeof clNumber !== 'number') return 
+
+      const result = await window.p4.shelve(clNumber, selectedFiles)
+      if (result.success) {
+        // Revert files after shelving to "move" them to shelf (prevent duplication)
+        try {
+          await window.p4.revert(selectedFiles)
+          
+          // Optimistic Update: Update local state immediately to avoid UI flickering
+          const newFiles = files.filter(f => {
+            // Remove existing shelved copies of the selected files (they are being overwritten)
+            if (selectedFiles.includes(f.depotFile) && f.status === 'shelved') {
+              return false
+            }
+            return true
+          }).map(f => {
+            // Convert open files to shelved
+            if (selectedFiles.includes(f.depotFile) && f.status !== 'shelved') {
+              return { ...f, status: 'shelved' as const }
+            }
+            return f
+          })
+          setFiles(newFiles)
+
+          toast?.showToast({
+            type: 'success',
+            title: 'Shelve Successful',
+            message: `${selectedFiles.length} file(s) moved to shelf`,
+            duration: 3000
+          })
+          refresh()
+        } catch (revertErr: any) {
+           toast?.showToast({
+            type: 'info',
+            title: 'Shelved with warning',
+            message: 'Files shelved but failed to revert: ' + revertErr.message,
+            duration: 5000
+          })
+          await refresh()
+        }
+      } else {
+        toast?.showToast({
+          type: 'error',
+          title: 'Shelve failed',
+          message: result.message,
+          duration: 5000
+        })
+      }
+    } catch (err: any) {
+      toast?.showToast({
+        type: 'error',
+        title: 'Shelve failed',
+        message: err.message,
+        duration: 5000
+      })
+    } finally {
+      setIsProcessing(false)
+      setLoading(false)
+    }
+  }
+
+  const handleUnshelve = async () => {
+    if (!contextMenu) return
+
+    const selectedFiles = filteredFiles
+      .filter(f => checkedFiles.has(f.depotFile) && f.status === 'shelved')
+      .map(f => f.depotFile)
+
+    if (selectedFiles.length === 0) return
+
+    // Clear selection immediately to hide intermediate states
+    clearSelection()
+    setIsProcessing(true)
+    setLoading(true)
+    setContextMenu(null)
+
+    try {
+      const clNumber = contextMenu.file.changelist === 'default' ? 0 : contextMenu.file.changelist
+      if (typeof clNumber !== 'number') return
+
+      // 1. Unshelve (Restore to workspace)
+      const result = await window.p4.unshelve(clNumber, selectedFiles)
+      
+      if (result.success) {
+        // 2. Verification: Check if files are actually opened
+        // This addresses "anxiety" by ensuring we don't delete unless we are sure.
+        try {
+          const openedFiles = await window.p4.getOpenedFiles()
+          const allRestored = selectedFiles.every(depotFile => 
+            openedFiles.some(f => f.depotFile === depotFile && f.action !== 'delete' && f.status !== 'shelved')
+          )
+          
+          if (!allRestored) {
+            throw new Error('Verification failed: Not all files were restored to workspace.')
+          }
+
+          // 3. Delete from shelf (Remove from shelf)
+          try {
+            await window.p4.deleteShelve(clNumber, selectedFiles)
+            
+            toast?.showToast({
+              type: 'success',
+              title: 'Unshelve Successful',
+              message: `${selectedFiles.length} file(s) moved to workspace`,
+              duration: 3000
+            })
+            await refresh()
+          } catch (delErr: any) {
+            toast?.showToast({
+              type: 'info',
+              title: 'Unshelved with warning',
+              message: 'Files restored but failed to remove from shelf: ' + delErr.message,
+              duration: 5000
+            })
+            await refresh()
+          }
+        } catch (verifyErr: any) {
+             toast?.showToast({
+              type: 'error',
+              title: 'Unshelve Verification Failed',
+              message: 'Files were NOT removed from shelf for safety. ' + verifyErr.message,
+              duration: 6000
+            })
+            await refresh()
+        }
+      } else {
+        toast?.showToast({
+          type: 'error',
+          title: 'Unshelve failed',
+          message: result.message,
+          duration: 5000
+        })
+      }
+    } catch (err: any) {
+      toast?.showToast({
+        type: 'error',
+        title: 'Unshelve failed',
+        message: err.message,
+        duration: 5000
+      })
+    } finally {
+      setIsProcessing(false)
+      setLoading(false)
+    }
+  }
+
+  const handleDeleteShelve = async () => {
+    if (!contextMenu) return
+
+    const selectedFiles = filteredFiles
+      .filter(f => checkedFiles.has(f.depotFile) && f.status === 'shelved')
+      .map(f => f.depotFile)
+
+    if (selectedFiles.length === 0) return
+
+    if (!confirm(`Delete shelved files? This cannot be undone.`)) {
+      setContextMenu(null)
+      return
+    }
+
+    setIsProcessing(true)
+    setLoading(true)
+    setContextMenu(null)
+
+    try {
+      const clNumber = contextMenu.file.changelist === 'default' ? 0 : contextMenu.file.changelist
+      if (typeof clNumber !== 'number') return
+
+      const result = await window.p4.deleteShelve(clNumber, selectedFiles)
+      if (result.success) {
+        toast?.showToast({
+          type: 'success',
+          title: 'Deleted shelved files',
+          message: `${selectedFiles.length} file(s) deleted from shelf`,
+          duration: 3000
+        })
+        clearSelection()
+        await refresh()
+      } else {
+        toast?.showToast({
+          type: 'error',
+          title: 'Delete shelve failed',
+          message: result.message,
+          duration: 5000
+        })
+      }
+    } catch (err: any) {
+      toast?.showToast({
+        type: 'error',
+        title: 'Delete shelve failed',
+        message: err.message,
+        duration: 5000
+      })
+    } finally {
+      setIsProcessing(false)
+      setLoading(false)
+    }
+  }
+
   // Close context menu on click outside
   const handleClick = () => {
     setContextMenu(null)
     setShowMoveToMenu(false)
   }
+
+  const renderFileItem = (file: typeof files[0], index: number, source: 'shelved' | 'opened') => {
+    const isSelected = selectedFile?.depotFile === file.depotFile
+    const isChecked = checkedFiles.has(file.depotFile)
+    const paddingClass = source === 'shelved' ? 'pl-9 pr-3' : 'px-3'
+    
+    return (
+      <li
+        key={file.depotFile}
+        draggable
+        onDragStart={(e) => handleDragStart(e, file)}
+        onContextMenu={(e) => handleContextMenu(e, file)}
+        onClick={(e) => handleFileClick(e, file, index, source)}
+        onDoubleClick={() => window.p4.openDiffWindow(file)}
+        className={`
+          flex items-center gap-2 ${paddingClass} py-2 cursor-pointer
+          hover:bg-gray-800 transition-colors
+          ${isSelected ? 'bg-gray-700' : isChecked ? 'bg-gray-800' : ''}
+        `}
+      >
+        <input
+          type="checkbox"
+          checked={isChecked}
+          onChange={(e) => {
+            e.stopPropagation()
+            toggleFileCheck(file.depotFile)
+            setLastClickedIndex(index)
+            setLastClickedSource(source)
+          }}
+          onClick={(e) => e.stopPropagation()}
+          className="w-4 h-4 rounded border-gray-600 bg-gray-700 text-p4-blue focus:ring-p4-blue focus:ring-offset-0"
+        />
+        <div className="flex items-center gap-2 flex-1 min-w-0">
+          <span className={`font-mono text-sm ${actionColors[file.action] || 'text-gray-400'}`}>
+            {actionIcons[file.action] || '?'}
+          </span>
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-2">
+              <div 
+                className="text-sm text-gray-200 truncate" 
+                title={getFileName(getFilePath(file))}
+              >
+                {getFileName(getFilePath(file))}
+              </div>
+            </div>
+            <div className="text-xs text-gray-500 truncate" title={getFilePath(file)}>
+              {getFilePath(file)}
+            </div>
+          </div>
+        </div>
+      </li>
+    )
+  }
+
+  const isShelved = contextMenu?.file.status === 'shelved'
 
   return (
     <div className="h-full flex flex-col" onClick={handleClick}>
@@ -355,57 +656,39 @@ export function FileList() {
             No changed files
           </div>
         ) : (
-          <ul>
-            {filteredFiles.map((file, index) => {
-              const isSelected = selectedFile?.depotFile === file.depotFile
-              const isChecked = checkedFiles.has(file.depotFile)
-              return (
-                <li
-                  key={file.depotFile + index}
-                  draggable
-                  onDragStart={(e) => handleDragStart(e, file)}
-                  onContextMenu={(e) => handleContextMenu(e, file)}
-                  onClick={(e) => handleFileClick(e, file, index)}
-                  onDoubleClick={() => window.p4.openDiffWindow(file)}
-                  className={`
-                    flex items-center gap-2 px-3 py-2 cursor-pointer
-                    hover:bg-gray-800 transition-colors
-                    ${isSelected ? 'bg-gray-700' : isChecked ? 'bg-gray-800' : ''}
-                  `}
+          <>
+            {/* Shelved Files Section */}
+            {shelvedFiles.length > 0 && (
+              <div className="border-b border-p4-border/50">
+                <div 
+                  className="px-3 py-1.5 bg-p4-darker hover:bg-gray-800 cursor-pointer flex items-center gap-2 select-none"
+                  onClick={(e) => { e.stopPropagation(); setShelvedExpanded(!isShelvedExpanded); }}
                 >
-                  <input
-                    type="checkbox"
-                    checked={isChecked}
-                    onChange={(e) => {
-                      e.stopPropagation()
-                      toggleFileCheck(file.depotFile)
-                      setLastClickedIndex(index) // Also update anchor on checkbox click
-                    }}
-                    onClick={(e) => e.stopPropagation()}
-                    className="w-4 h-4 rounded border-gray-600 bg-gray-700 text-p4-blue focus:ring-p4-blue focus:ring-offset-0"
-                  />
-                  <div
-                    className="flex items-center gap-2 flex-1 min-w-0"
-                  >
-                    <span className={`font-mono text-sm ${actionColors[file.action] || 'text-gray-400'}`}>
-                      {actionIcons[file.action] || '?'}
-                    </span>
-                    <div className="flex-1 min-w-0">
-                      <div 
-                        className="text-sm text-gray-200 truncate" 
-                        title={getFileName(getFilePath(file))}
-                      >
-                        {getFileName(getFilePath(file))}
-                      </div>
-                      <div className="text-xs text-gray-500 truncate" title={getFilePath(file)}>
-                        {getFilePath(file)}
-                      </div>
-                    </div>
-                  </div>
-                </li>
-              )
-            })}
-          </ul>
+                  <span className="text-gray-400 text-xs">
+                    {isShelvedExpanded ? '▼' : '▶'}
+                  </span>
+                  <span className="text-xs font-semibold text-yellow-500/80 uppercase tracking-wider">
+                    Shelved Files
+                  </span>
+                  <span className="text-xs text-gray-500 bg-gray-800 px-1.5 rounded-full">
+                    {shelvedFiles.length}
+                  </span>
+                </div>
+                {isShelvedExpanded && (
+                  <ul>
+                    {shelvedFiles.map((file, index) => renderFileItem(file, index, 'shelved'))}
+                  </ul>
+                )}
+              </div>
+            )}
+
+            {/* Opened Files Section */}
+            {openedFiles.length > 0 && (
+              <ul>
+                {openedFiles.map((file, index) => renderFileItem(file, index, 'opened'))}
+              </ul>
+            )}
+          </>
         )}
       </div>
 
@@ -470,6 +753,41 @@ export function FileList() {
               </div>
             )}
           </div>
+
+          <div className="border-t border-p4-border my-1" />
+
+          {/* Shelve Actions */}
+          {!isShelved && (
+            <button
+              onClick={handleShelve}
+              disabled={isProcessing}
+              className="w-full px-4 py-2 text-left text-sm hover:bg-gray-700 flex items-center gap-2 text-gray-200 disabled:opacity-50"
+            >
+              <span>☁</span>
+              <span>Shelve Files</span>
+            </button>
+          )}
+
+          {isShelved && (
+            <>
+              <button
+                onClick={handleUnshelve}
+                disabled={isProcessing}
+                className="w-full px-4 py-2 text-left text-sm hover:bg-gray-700 flex items-center gap-2 text-gray-200 disabled:opacity-50"
+              >
+                <span>▼</span>
+                <span>Unshelve Files</span>
+              </button>
+              <button
+                onClick={handleDeleteShelve}
+                disabled={isProcessing}
+                className="w-full px-4 py-2 text-left text-sm hover:bg-gray-700 flex items-center gap-2 text-red-400 disabled:opacity-50"
+              >
+                <span>✕</span>
+                <span>Delete Shelve</span>
+              </button>
+            </>
+          )}
 
           <div className="border-t border-p4-border my-1" />
 

@@ -12,6 +12,7 @@ export interface P4File {
   action: 'add' | 'edit' | 'delete' | 'branch' | 'move/add' | 'move/delete' | 'integrate'
   changelist: number | 'default'
   type: string
+  status?: 'open' | 'shelved'
 }
 
 export interface P4Changelist {

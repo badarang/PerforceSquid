@@ -65,6 +65,17 @@ function App() {
       setDepotPath(stream)
     }
     loadDepotPath()
+
+    // Refresh on window focus to catch external changes
+    const handleFocus = () => {
+      if (useP4Store.getState().isLoading) return
+      refresh()
+    }
+    window.addEventListener('focus', handleFocus)
+
+    return () => {
+      window.removeEventListener('focus', handleFocus)
+    }
   }, [selectedClient])
 
   const handleClientSelected = (client: string) => {

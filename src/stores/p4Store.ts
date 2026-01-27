@@ -14,6 +14,7 @@ interface P4File {
   action: 'add' | 'edit' | 'delete' | 'branch' | 'move/add' | 'move/delete' | 'integrate'
   changelist: number | 'default'
   type: string
+  status?: 'open' | 'shelved'
 }
 
 interface P4Changelist {
@@ -146,11 +147,10 @@ export const useP4Store = create<P4Store>((set, get) => ({
 
   fetchFiles: async () => {
     try {
-      set({ isLoading: true })
       const files = await window.p4.getOpenedFiles()
-      set({ files, isLoading: false, error: null })
+      set({ files, error: null })
     } catch (err: any) {
-      set({ files: [], isLoading: false, error: err.message })
+      set({ files: [], error: err.message })
     }
   },
 
@@ -175,6 +175,7 @@ export const useP4Store = create<P4Store>((set, get) => ({
   },
 
   refresh: async () => {
+    // Don't set global isLoading to avoid UI flashing/blocking during refresh
     const { fetchInfo, fetchFiles, fetchChangelists } = get()
     await Promise.all([fetchInfo(), fetchFiles(), fetchChangelists()])
   }

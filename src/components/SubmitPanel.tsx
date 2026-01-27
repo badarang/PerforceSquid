@@ -156,7 +156,11 @@ export function SubmitPanel() {
     }
   }
 
-  const handleRequestReview = async () => {
+  const [showReviewModal, setShowReviewModal] = useState(false)
+  const [reviewers, setReviewers] = useState(() => localStorage.getItem('p4_reviewers') || '')
+  const [groups, setGroups] = useState(() => localStorage.getItem('p4_review_groups') || '')
+
+  const handleRequestReviewClick = () => {
     if (!submitDescription.trim()) {
       toast?.showToast({
         type: 'error',
@@ -175,24 +179,52 @@ export function SubmitPanel() {
       return
     }
 
+    setShowReviewModal(true)
+  }
+
+  const confirmRequestReview = async () => {
+    setShowReviewModal(false)
     setIsSubmitting(true)
 
+    // Cache values
+    localStorage.setItem('p4_reviewers', reviewers)
+    localStorage.setItem('p4_review_groups', groups)
+
     try {
+      // Append reviewers to description
+      let finalDescription = submitDescription.trim()
+      
+      const userList = reviewers.split(',').map(u => u.trim()).filter(Boolean)
+      const groupList = groups.split(',').map(g => g.trim()).filter(Boolean)
+      
+      if (userList.length > 0 || groupList.length > 0) {
+        finalDescription += '\n\n#review' // Keyword often helps Swarm trigger
+        
+        if (userList.length > 0) {
+          finalDescription += '\nReviewers: ' + userList.map(u => u.startsWith('@') ? u : `@${u}`).join(' ')
+        }
+        
+        if (groupList.length > 0) {
+          // Swarm uses @@groupname for groups
+          finalDescription += '\nGroups: ' + groupList.map(g => g.startsWith('@@') ? g : (g.startsWith('@') ? `@${g}` : `@@${g}`)).join(' ')
+        }
+      }
+
+      // Move checked files to this new CL (or identify them if already there)
+      const filesToReview = filteredFiles
+        .filter(f => checkedFiles.has(f.depotFile))
+        .map(f => f.depotFile)
+
       let targetChangelistId = selectedChangelist === 'default' ? 0 : selectedChangelist
 
       // If Default CL: Create new CL and move files
       if (targetChangelistId === 0) {
-        const createResult = await window.p4.createChangelist(submitDescription)
+        const createResult = await window.p4.createChangelist(finalDescription)
         if (!createResult.success) {
           throw new Error(createResult.message)
         }
         targetChangelistId = createResult.changelistNumber
         
-        // Move checked files to this new CL
-        const filesToReview = filteredFiles
-          .filter(f => checkedFiles.has(f.depotFile))
-          .map(f => f.depotFile)
-          
         await window.p4.reopenFiles(filesToReview, targetChangelistId)
       } else {
         // If Numbered CL: Move unchecked files away, update description
@@ -204,27 +236,29 @@ export function SubmitPanel() {
           await window.p4.reopenFiles(uncheckedFiles, 'default')
         }
         
-        await window.p4.editChangelist(targetChangelistId as number, submitDescription)
+        await window.p4.editChangelist(targetChangelistId as number, finalDescription)
       }
 
       // Shelve
       const shelveResult = await window.p4.shelve(targetChangelistId as number)
       
       if (shelveResult.success) {
+        // Revert files after shelving (Standard "Shelve" workflow often implies keeping them open, 
+        // but user specifically requested "Shelve and Revert" behavior to avoid duplication/confusion)
+        // We revert only the files we just shelved.
+        await window.p4.revert(filesToReview)
+
         // Try to get Swarm URL
         const swarmUrl = await window.p4.getSwarmUrl()
         let message = `Shelved files in CL ${targetChangelistId}`
         
         if (swarmUrl) {
-          // Construct Swarm link (standard format: URL/changes/CL)
-          // Ensure swarmUrl doesn't end with / and append path
+          // Construct Swarm link
           const cleanSwarmUrl = swarmUrl.replace(/\/$/, '')
-          const reviewLink = `${cleanSwarmUrl}/changes/${targetChangelistId}`
+          // Changed from /changes/ to /reviews/ per user request
+          const reviewLink = `${cleanSwarmUrl}/reviews/${targetChangelistId}`
           message = `Review created: ${reviewLink}`
           
-          // Allow user to click (we'll rely on the toast implementation or just show text for now)
-          // Ideally we would have a clickable action, but message is fine.
-          // We can also log it to console for easy access
           console.log('Swarm Review Link:', reviewLink)
         }
 
@@ -232,7 +266,7 @@ export function SubmitPanel() {
           type: 'success',
           title: 'Review Requested',
           message: message,
-          duration: 8000 // Longer duration to read link
+          duration: 8000
         })
         setSubmitDescription('')
         await refresh()
@@ -253,78 +287,136 @@ export function SubmitPanel() {
   }
 
   return (
-    <div className="border-t border-p4-border bg-p4-darker p-3">
-      {/* Description Helper Controls */}
-      <div className="flex flex-wrap items-center gap-2 mb-2">
-        <div className="flex gap-1">
-          {prefixes.map(p => (
+    <>
+      <div className="border-t border-p4-border bg-p4-darker p-3">
+        {/* Description Helper Controls */}
+        <div className="flex flex-wrap items-center gap-2 mb-2">
+          <div className="flex gap-1">
+            {prefixes.map(p => (
+              <button
+                key={p.label}
+                onClick={() => handlePrefixClick(p.value)}
+                className="px-2 py-0.5 text-xs bg-p4-border hover:bg-gray-600 rounded text-gray-300 transition-colors"
+                title={`Add ${p.label} prefix`}
+              >
+                {p.label}
+              </button>
+            ))}
+          </div>
+          <div className="h-4 w-px bg-p4-border mx-1"></div>
+          <div className="flex flex-1 items-center gap-1 min-w-[200px]">
+            <input
+              type="text"
+              value={issueLink}
+              onChange={(e) => handleIssueLinkChange(e.target.value)}
+              placeholder="Issue URL or ID"
+              className="flex-1 bg-p4-dark border border-p4-border rounded px-2 py-0.5 text-xs focus:outline-none focus:border-p4-blue"
+            />
             <button
-              key={p.label}
-              onClick={() => handlePrefixClick(p.value)}
-              className="px-2 py-0.5 text-xs bg-p4-border hover:bg-gray-600 rounded text-gray-300 transition-colors"
-              title={`Add ${p.label} prefix`}
+              onClick={addIssueLinkToDescription}
+              disabled={!issueLink.trim()}
+              className="px-2 py-0.5 text-xs bg-p4-border hover:bg-gray-600 rounded text-gray-300 disabled:opacity-50"
+              title="Append to description"
             >
-              {p.label}
+              Add
             </button>
-          ))}
+            <button
+              onClick={openIssueLink}
+              disabled={!issueLink.trim() || !issueLink.startsWith('http')}
+              className="px-2 py-0.5 text-xs bg-p4-border hover:bg-gray-600 rounded text-gray-300 disabled:opacity-50"
+              title="Test Link"
+            >
+              ↗
+            </button>
+          </div>
         </div>
-        <div className="h-4 w-px bg-p4-border mx-1"></div>
-        <div className="flex flex-1 items-center gap-1 min-w-[200px]">
-          <input
-            type="text"
-            value={issueLink}
-            onChange={(e) => handleIssueLinkChange(e.target.value)}
-            placeholder="Issue URL or ID"
-            className="flex-1 bg-p4-dark border border-p4-border rounded px-2 py-0.5 text-xs focus:outline-none focus:border-p4-blue"
+
+        <div className="mb-2">
+          <textarea
+            value={submitDescription}
+            onChange={(e) => setSubmitDescription(e.target.value)}
+            placeholder="Enter changelist description..."
+            className="w-full h-20 bg-p4-dark border border-p4-border rounded p-2 text-sm resize-none focus:outline-none focus:border-p4-blue"
           />
-          <button
-            onClick={addIssueLinkToDescription}
-            disabled={!issueLink.trim()}
-            className="px-2 py-0.5 text-xs bg-p4-border hover:bg-gray-600 rounded text-gray-300 disabled:opacity-50"
-            title="Append to description"
-          >
-            Add
-          </button>
-          <button
-            onClick={openIssueLink}
-            disabled={!issueLink.trim() || !issueLink.startsWith('http')}
-            className="px-2 py-0.5 text-xs bg-p4-border hover:bg-gray-600 rounded text-gray-300 disabled:opacity-50"
-            title="Test Link"
-          >
-            ↗
-          </button>
+        </div>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <span className="text-xs text-gray-500 whitespace-nowrap">
+            {checkedCount} file(s) selected
+          </span>
+          <div className="flex gap-2 flex-shrink-0">
+            <button
+              onClick={handleRequestReviewClick}
+              disabled={isSubmitting || checkedCount === 0 || !submitDescription.trim()}
+              className="px-3 py-1.5 text-xs font-medium bg-purple-600 hover:bg-purple-500 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
+            >
+              Request Review
+            </button>
+            <button
+              onClick={handleSubmit}
+              disabled={isSubmitting || checkedCount === 0 || !submitDescription.trim()}
+              className="px-3 py-1.5 text-xs font-medium bg-p4-blue hover:bg-blue-600 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
+            >
+              {isSubmitting ? 'Submitting...' : `Submit (${checkedCount})`}
+            </button>
+          </div>
         </div>
       </div>
 
-      <div className="mb-2">
-        <textarea
-          value={submitDescription}
-          onChange={(e) => setSubmitDescription(e.target.value)}
-          placeholder="Enter changelist description..."
-          className="w-full h-20 bg-p4-dark border border-p4-border rounded p-2 text-sm resize-none focus:outline-none focus:border-p4-blue"
-        />
-      </div>
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <span className="text-xs text-gray-500 whitespace-nowrap">
-          {checkedCount} file(s) selected
-        </span>
-        <div className="flex gap-2 flex-shrink-0">
-          <button
-            onClick={handleRequestReview}
-            disabled={isSubmitting || checkedCount === 0 || !submitDescription.trim()}
-            className="px-3 py-1.5 text-xs font-medium bg-purple-600 hover:bg-purple-500 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
-          >
-            Request Review
-          </button>
-          <button
-            onClick={handleSubmit}
-            disabled={isSubmitting || checkedCount === 0 || !submitDescription.trim()}
-            className="px-3 py-1.5 text-xs font-medium bg-p4-blue hover:bg-blue-600 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
-          >
-            {isSubmitting ? 'Submitting...' : `Submit (${checkedCount})`}
-          </button>
+      {/* Review Modal */}
+      {showReviewModal && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-p4-darker border border-p4-border rounded-lg shadow-xl w-[400px] flex flex-col">
+            <div className="p-4 border-b border-p4-border">
+              <h3 className="text-lg font-medium text-white">Request Review</h3>
+            </div>
+            
+            <div className="p-4 space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-400 mb-1">
+                  Reviewers (Users)
+                </label>
+                <input
+                  type="text"
+                  value={reviewers}
+                  onChange={(e) => setReviewers(e.target.value)}
+                  placeholder="user1, user2"
+                  className="w-full bg-p4-dark border border-p4-border rounded px-3 py-2 text-white focus:outline-none focus:border-p4-blue text-sm"
+                />
+                <p className="text-xs text-gray-500 mt-1">Comma separated list of users</p>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-400 mb-1">
+                  Reviewers (Groups)
+                </label>
+                <input
+                  type="text"
+                  value={groups}
+                  onChange={(e) => setGroups(e.target.value)}
+                  placeholder="group1, group2"
+                  className="w-full bg-p4-dark border border-p4-border rounded px-3 py-2 text-white focus:outline-none focus:border-p4-blue text-sm"
+                />
+                <p className="text-xs text-gray-500 mt-1">Comma separated list of groups</p>
+              </div>
+            </div>
+
+            <div className="p-4 border-t border-p4-border flex justify-end gap-2 bg-p4-dark">
+              <button
+                onClick={() => setShowReviewModal(false)}
+                className="px-4 py-2 text-sm bg-gray-700 hover:bg-gray-600 rounded text-white transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={confirmRequestReview}
+                className="px-4 py-2 text-sm bg-purple-600 hover:bg-purple-500 rounded text-white transition-colors"
+              >
+                Confirm & Request
+              </button>
+            </div>
+          </div>
         </div>
-      </div>
-    </div>
+      )}
+    </>
   )
 }
