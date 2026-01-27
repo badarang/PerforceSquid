@@ -5,6 +5,23 @@ import type { P4Info, P4File, P4Changelist, P4DiffResult, P4Stream, P4Workspace,
 
 const execAsync = promisify(exec)
 
+// Helper: Limit concurrency for async operations to avoid spawning too many processes
+async function pMap<T, R>(
+  array: T[],
+  mapper: (item: T, index: number) => Promise<R>,
+  concurrency: number
+): Promise<R[]> {
+  const results = new Array<R>(array.length)
+  const iterator = array.entries()
+  const workers = new Array(Math.min(array.length, concurrency)).fill(null).map(async () => {
+    for (const [i, item] of iterator) {
+      results[i] = await mapper(item, i)
+    }
+  })
+  await Promise.all(workers)
+  return results
+}
+
 export interface P4Client {
   name: string
   root: string
@@ -13,9 +30,14 @@ export interface P4Client {
 
 export class P4Service {
   private currentClient: string | null = null
+  private cachedInfo: P4Info | null = null
 
   setClient(clientName: string) {
-    this.currentClient = clientName
+    if (this.currentClient !== clientName) {
+      this.currentClient = clientName
+      // Invalidate cache if client changes
+      this.cachedInfo = null
+    }
   }
 
   getClient(): string | null {
@@ -65,49 +87,12 @@ export class P4Service {
     submitOptions: string
     stream?: string
     description?: string
-    backup?: boolean // Custom option handled by us, if we want to store it somewhere or use it? 
-                     // Wait, user asked for "Backup enable" which likely refers to p4 option if it exists.
-                     // But as discussed, "backup" is not standard.
-                     // I will assume the user meant the "backup" option if it's supported by their p4 version, 
-                     // or just pass it in the options string if they provide it there.
-                     // The `options` string argument should cover "compress rmdir backup".
+    backup?: boolean 
   }): Promise<{ success: boolean; message: string }> {
     try {
-      // 1. Get default spec
       const defaultSpec = await this.runCommand(['client', '-o', client.name])
-      
-      // 2. Parse and modify spec
       const lines = defaultSpec.split('\n')
       const newLines: string[] = []
-      let insideView = false
-      
-      // We will rebuild the spec. simpler to just replace fields if we find them, 
-      // or append if we don't? `client -o` returns a valid spec.
-      // We need to replace Root, Options, SubmitOptions, Stream (if any)
-      
-      // Helper to set a field
-      const setField = (key: string, value: string) => {
-        const index = newLines.findIndex(l => l.startsWith(key + ':'))
-        if (index !== -1) {
-          newLines[index] = `${key}:\t${value}`
-        } else {
-          // Insert before View or at end
-          const viewIndex = newLines.findIndex(l => l.startsWith('View:'))
-          if (viewIndex !== -1) {
-            newLines.splice(viewIndex, 0, `${key}:\t${value}`)
-          } else {
-            newLines.push(`${key}:\t${value}`)
-          }
-        }
-      }
-
-      // First pass: copy all lines, removing ones we want to override to be safe?
-      // actually `client -o` output is standard.
-      
-      // Better approach: Regex replace on the whole string might be safer for multiline issues?
-      // No, line based is better for specific fields.
-
-      // Let's iterate and replace
       let skipView = false
 
       for (const line of lines) {
@@ -120,7 +105,7 @@ export class P4Service {
         } else if (line.startsWith('Stream:')) {
            if (client.stream) {
              newLines.push(`Stream:\t${client.stream}`)
-             skipView = true // Stream clients should not have manual View
+             skipView = true
            }
         } else if (line.startsWith('View:')) {
            if (skipView) {
@@ -134,51 +119,32 @@ export class P4Service {
         } else if (line.startsWith('\t') && newLines[newLines.length - 2]?.startsWith('Description:')) {
             // Skipping old description lines
         } else {
-            // Handle View lines (start with tab)
             if (skipView && line.startsWith('\t') && !line.trim().startsWith('Options:') && !line.trim().startsWith('Root:')) {
-              // This assumes View lines are indented. 
-              // We need to be careful not to skip other indented fields if they appear after View, 
-              // but in standard spec View is usually last.
               continue
             }
             newLines.push(line)
         }
       }
       
-      // Handle missing fields if they weren't in the default spec
       if (!newLines.some(l => l.startsWith('Root:'))) newLines.splice(newLines.findIndex(l => l.startsWith('View:')), 0, `Root:\t${client.root}`)
       if (!newLines.some(l => l.startsWith('Options:'))) newLines.splice(newLines.findIndex(l => l.startsWith('View:')), 0, `Options:\t${client.options}`)
       if (!newLines.some(l => l.startsWith('SubmitOptions:'))) newLines.splice(newLines.findIndex(l => l.startsWith('View:')), 0, `SubmitOptions:\t${client.submitOptions}`)
       if (client.stream && !newLines.some(l => l.startsWith('Stream:'))) newLines.splice(newLines.findIndex(l => l.startsWith('View:')), 0, `Stream:\t${client.stream}`)
 
-      // If stream is set, View must be empty (generated) or matching stream. 
-      // Safest is to let p4 handle View if Stream is present? 
-      // Actually `client -o` with Stream set returns a generated View. 
-      // If we are adding Stream to a non-stream default spec, we might need to remove View?
-      // But typically `p4 client -i` ignores View if Stream is provided.
-
       const spec = newLines.join('\n')
-      
       const output = await this.runCommand(['client', '-i'], spec)
       
-      return {
-        success: true,
-        message: output
-      }
+      return { success: true, message: output }
     } catch (error: any) {
-      return {
-        success: false,
-        message: error.message
-      }
+      return { success: false, message: error.message }
     }
   }
 
   async getClients(): Promise<P4Client[]> {
     try {
-      // First get user name
-      const { stdout } = await execAsync('p4 info', { encoding: 'utf8' })
-      const userMatch = stdout.match(/User name:\s*(\S+)/)
-      const userName = userMatch ? userMatch[1] : ''
+      // Use cached info if available to get userName
+      const info = await this.getInfo()
+      const userName = info.userName
 
       if (!userName) {
         return []
@@ -193,7 +159,6 @@ export class P4Service {
       const lines = output.stdout.trim().split('\n')
 
       for (const line of lines) {
-        // Format: Client name date root path 'description'
         const match = line.match(/^Client\s+(\S+)\s+\S+\s+root\s+(\S+)\s+'(.+)'/)
         if (match) {
           clients.push({
@@ -223,6 +188,10 @@ export class P4Service {
   }
 
   async getInfo(): Promise<P4Info> {
+    if (this.cachedInfo) {
+      return this.cachedInfo
+    }
+
     const output = await this.runCommand(['info'])
     const lines = output.split('\n')
     const info: Partial<P4Info> = {}
@@ -241,26 +210,24 @@ export class P4Service {
       }
     }
 
-    return info as P4Info
+    this.cachedInfo = info as P4Info
+    return this.cachedInfo
   }
 
   async getOpenedFiles(): Promise<P4File[]> {
-    try {
-      // Use fstat -Ro to get local file paths in clientFile
-      const output = await this.runCommand(['-ztag', 'fstat', '-Ro', '//...'])
-      
-      if (!output.trim()) {
-        return []
-      }
+    const fileMap = new Map<string, P4File>()
 
-      const files: P4File[] = []
+    const parseOutput = (output: string, status: 'open' | 'shelved') => {
       const lines = output.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n')
-      
       let currentFile: any = {}
-      
+
       const pushCurrentFile = () => {
         if (currentFile.depotFile) {
-          files.push(this.mapZtagToFile(currentFile))
+          const file = this.mapZtagToFile(currentFile)
+          file.status = status
+          if (!fileMap.has(file.depotFile)) {
+            fileMap.set(file.depotFile, file)
+          }
         }
         currentFile = {}
       }
@@ -281,9 +248,40 @@ export class P4Service {
 
         currentFile[key] = trimmedValue
       }
-      
       pushCurrentFile()
-      return files
+    }
+
+    try {
+      const openedTask = this.runCommand(['-ztag', 'fstat', '-Ro', '//...'])
+        .catch(err => {
+          if (err.message?.includes('not opened') || err.message?.includes('no such file')) return ''
+          throw err
+        })
+
+      const [openedOutput, changelists] = await Promise.all([
+        openedTask,
+        this.getChangelists()
+      ])
+
+      if (openedOutput) {
+        parseOutput(openedOutput, 'open')
+      }
+
+      const numberedChangelists = changelists.filter(c => c.number > 0)
+      if (numberedChangelists.length > 0) {
+        await pMap(numberedChangelists, async (cl) => {
+          try {
+            const shelfOutput = await this.runCommand(['-ztag', 'fstat', '-Rs', '-e', String(cl.number), '//...'])
+            if (shelfOutput) {
+              parseOutput(shelfOutput, 'shelved')
+            }
+          } catch (e) {
+            // Ignore errors
+          }
+        }, 5)
+      }
+
+      return Array.from(fileMap.values())
     } catch (error: any) {
       if (error.message?.includes('not opened') || error.message?.includes('no such file')) return []
       throw error
@@ -300,32 +298,28 @@ export class P4Service {
       type: data.type || data.headType || 'text'
     }
   }
-async getDiff(file: P4File | string): Promise<P4DiffResult> {
+
+  async getDiff(file: P4File | string): Promise<P4DiffResult> {
     const depotPath = typeof file === 'string' ? file : file.depotFile
     const clientPath = typeof file === 'string' ? null : file.clientFile
 
     try {
-      const diffOutput = await this.runCommand(['diff', '-du', `"${depotPath}"`])
-
-      let oldContent = ''
-      try {
-        oldContent = await this.runCommand(['print', '-q', `"${depotPath}#have"`])
-      } catch {
-      }
-
-      let newContent = ''
-      try {
-        if (clientPath && clientPath.trim() !== '') {
-          const fs = await import('fs/promises')
-          const normalizedPath = clientPath.replace(/\//g, '\\')
-          newContent = await fs.readFile(normalizedPath, 'utf8')
-        } else {
-          newContent = await this.runCommand(['print', '-q', `"${depotPath}"`])
-        }
-      } catch (err) {
-        console.error('Local file read failed, falling back to P4 print:', err)
-        newContent = await this.runCommand(['print', '-q', `"${depotPath}"`])
-      }
+      const [diffOutput, oldContent, newContent] = await Promise.all([
+        this.runCommand(['diff', '-du', `"${depotPath}"`]),
+        this.runCommand(['print', '-q', `"${depotPath}#have"`]).catch(() => ''),
+        (async () => {
+          try {
+            if (clientPath && clientPath.trim() !== '') {
+              const fs = await import('fs/promises')
+              const normalizedPath = clientPath.replace(/\//g, '\\')
+              return await fs.readFile(normalizedPath, 'utf8')
+            }
+          } catch (err) {
+            console.error('Local file read failed, falling back to P4 print:', err)
+          }
+          return await this.runCommand(['print', '-q', `"${depotPath}"`])
+        })()
+      ])
 
       return {
         filePath: depotPath,
@@ -371,7 +365,6 @@ async getDiff(file: P4File | string): Promise<P4DiffResult> {
 
       const lines = output.trim().split('\n')
       for (const line of lines) {
-        // Format: Change 12345 on 2024/01/01 by user@client *pending* 'description'
         const match = line.match(/^Change (\d+) on (\S+) by (\S+)@(\S+) \*pending\* '(.+)'/)
         if (match) {
           const [, number, date, user, client, description] = match
@@ -401,35 +394,22 @@ async getDiff(file: P4File | string): Promise<P4DiffResult> {
   async submit(changelist: number, description: string): Promise<{ success: boolean; message: string }> {
     try {
       let output: string
-
       if (changelist === 0) {
-        // Submit default changelist
         output = await this.runCommand(['submit', '-d', `"${description}"`])
       } else {
-        // Update description and submit
         output = await this.runCommand(['submit', '-c', String(changelist)])
       }
-
-      return {
-        success: true,
-        message: output
-      }
+      return { success: true, message: output }
     } catch (error: any) {
-      return {
-        success: false,
-        message: error.message
-      }
+      return { success: false, message: error.message }
     }
   }
 
-  // Create a new changelist with given description
   async createChangelist(description: string): Promise<{ success: boolean; changelistNumber: number; message: string }> {
     try {
-      // Create changelist spec
       const spec = `Change: new\nDescription: ${description}\n`
       const output = await this.runCommand(['change', '-i'], spec)
 
-      // Parse the changelist number from output like "Change 12345 created."
       const match = output.match(/Change (\d+) created/)
       if (match) {
         return {
@@ -438,29 +418,15 @@ async getDiff(file: P4File | string): Promise<P4DiffResult> {
           message: output
         }
       }
-      return {
-        success: false,
-        changelistNumber: 0,
-        message: 'Failed to parse changelist number'
-      }
+      return { success: false, changelistNumber: 0, message: 'Failed to parse changelist number' }
     } catch (error: any) {
-      return {
-        success: false,
-        changelistNumber: 0,
-        message: error.message
-      }
+      return { success: false, changelistNumber: 0, message: error.message }
     }
   }
 
-  // Edit an existing changelist's description
   async editChangelist(changelist: number, description: string): Promise<{ success: boolean; message: string }> {
     try {
-      // Get current spec
       const spec = await this.runCommand(['change', '-o', String(changelist)])
-      
-      // Update description
-      // Description is strictly indented.
-      // We'll use a safer replacement strategy: replace everything after 'Description:' until 'Files:' or end
       
       const lines = spec.split('\n')
       const newLines: string[] = []
@@ -469,7 +435,6 @@ async getDiff(file: P4File | string): Promise<P4DiffResult> {
       for (const line of lines) {
         if (line.startsWith('Description:')) {
           newLines.push('Description:')
-          // Add new description indented
           const descLines = description.trim().split('\n')
           for (const d of descLines) {
             newLines.push(`\t${d}`)
@@ -486,24 +451,16 @@ async getDiff(file: P4File | string): Promise<P4DiffResult> {
       const newSpec = newLines.join('\n')
       const output = await this.runCommand(['change', '-i'], newSpec)
       
-      return {
-        success: true,
-        message: output
-      }
+      return { success: true, message: output }
     } catch (error: any) {
-      return {
-        success: false,
-        message: error.message
-      }
+      return { success: false, message: error.message }
     }
   }
 
-  // Find or create a "Junk" changelist
   async getOrCreateJunkChangelist(): Promise<{ success: boolean; changelistNumber: number; message: string }> {
     try {
       const changelists = await this.getChangelists()
 
-      // Look for existing junk changelist
       const junkCL = changelists.find(cl =>
         cl.description.toLowerCase().includes('junk') ||
         cl.description.toLowerCase().includes('do not submit') ||
@@ -517,15 +474,9 @@ async getDiff(file: P4File | string): Promise<P4DiffResult> {
           message: 'Found existing junk changelist'
         }
       }
-
-      // Create new junk changelist
       return await this.createChangelist('[JUNK - Do Not Submit]')
     } catch (error: any) {
-      return {
-        success: false,
-        changelistNumber: 0,
-        message: error.message
-      }
+      return { success: false, changelistNumber: 0, message: error.message }
     }
   }
 
@@ -536,28 +487,19 @@ async getDiff(file: P4File | string): Promise<P4DiffResult> {
         args.push(`"${filePath}"`)
       }
       const output = await this.runCommand(args)
-      return {
-        success: true,
-        message: output || 'Already up to date'
-      }
+      return { success: true, message: output || 'Already up to date' }
     } catch (error: any) {
-      return {
-        success: false,
-        message: error.message
-      }
+      return { success: false, message: error.message }
     }
   }
 
   async revert(files: string[]): Promise<{ success: boolean; message: string }> {
     try {
-      // Quote files to handle spaces
       const quotedFiles = files.map(f => `"${f}"`)
-      
-      // Check for files opened for 'add' that need to be deleted physically after revert
       const filesToDelete: string[] = []
+      
       try {
         const fstatOutput = await this.runCommand(['fstat', '-T', 'clientFile,action', ...quotedFiles])
-        
         const lines = fstatOutput.replace(/\r/g, '').split('\n')
         let currentBlock: { clientFile?: string, action?: string } = {}
         
@@ -570,77 +512,46 @@ async getDiff(file: P4File | string): Promise<P4DiffResult> {
             currentBlock = {}
             continue
           }
-          
           if (trimmed.startsWith('... clientFile ')) {
             currentBlock.clientFile = trimmed.substring(15).trim()
           } else if (trimmed.startsWith('... action ')) {
             currentBlock.action = trimmed.substring(11).trim()
           }
         }
-        // Process last block
         if (currentBlock.clientFile && currentBlock.action === 'add') {
           filesToDelete.push(currentBlock.clientFile)
         }
       } catch (err) {
-        // Ignore fstat errors (e.g. if file is not opened)
         console.warn('fstat failed during revert check:', err)
       }
 
       const output = await this.runCommand(['revert', ...quotedFiles])
 
-      // Cleanup files that were 'add'ed
       if (filesToDelete.length > 0) {
-        const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
-
-        for (const file of filesToDelete) {
-          let deleted = false
-          let lastError: any = null
-          
-          // Retry logic for file deletion (e.g. if locked by Unity)
+        // Parallel deletion attempt
+        await Promise.all(filesToDelete.map(async (file) => {
+          const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
           for (let i = 0; i < 5; i++) {
             try {
               await fs.unlink(file)
-              deleted = true
               break
             } catch (e: any) {
-              lastError = e
-              if (e.code === 'ENOENT') {
-                deleted = true // Already gone
-                break
-              }
-              // Wait and retry
+              if (e.code === 'ENOENT') break
               await sleep(100 * (i + 1))
             }
           }
-          
-          if (!deleted) {
-            console.error(`Failed to delete reverted file after retries: ${file}`, lastError)
-          } else {
-            // Success - also try to cleanup associated .meta file (Unity)
-            if (!file.endsWith('.meta')) {
-              try {
-                await fs.unlink(file + '.meta')
-              } catch (e) {
-                // Ignore .meta deletion errors (it might not exist or handled separately)
-              }
-            }
+          if (!file.endsWith('.meta')) {
+            try { await fs.unlink(file + '.meta') } catch {}
           }
-        }
+        }))
       }
 
-      return {
-        success: true,
-        message: output
-      }
+      return { success: true, message: output }
     } catch (error: any) {
-      return {
-        success: false,
-        message: error.message
-      }
+      return { success: false, message: error.message }
     }
   }
 
-  // Revert files that have not actually changed
   async revertUnchanged(): Promise<{ success: boolean; message: string; revertedCount: number }> {
     try {
       let totalReverted = 0
@@ -664,18 +575,14 @@ async getDiff(file: P4File | string): Promise<P4DiffResult> {
         const filesToRevert: string[] = []
         const addFiles: string[] = []
 
-        // Actions that should always be auto-reverted
         const autoRevertActions = ['delete', 'move/delete', 'branch', 'integrate']
 
         for (const line of openedOutput.split('\n')) {
           if (!line.trim()) continue
-
           const match = line.match(/^(.+?)#\d+/)
           if (!match) continue
-
           const depotFile = match[1]
 
-          // Check for auto-revert actions
           let matched = false
           for (const action of autoRevertActions) {
             if (line.includes(` - ${action} `)) {
@@ -684,29 +591,26 @@ async getDiff(file: P4File | string): Promise<P4DiffResult> {
               break
             }
           }
-
-          // Collect add/move-add files separately for special handling
           if (!matched && (line.includes(' - add ') || line.includes(' - move/add '))) {
             addFiles.push(depotFile)
           }
         }
 
-        // For add files, check if they already exist in depot (wrongly opened for add)
-        // If depot version exists, revert them
-        for (const file of addFiles) {
-          try {
-            // Check if file exists in depot
-            await this.runCommand(['files', file])
-            // If no error, file exists in depot - should be reverted
-            filesToRevert.push(file)
-          } catch (err: any) {
-            // File doesn't exist in depot - it's a real new file, don't revert
-          }
+        // Check addFiles in parallel
+        if (addFiles.length > 0) {
+            const results = await pMap(addFiles, async (file) => {
+                try {
+                    await this.runCommand(['files', file])
+                    return file // Exists, so revert
+                } catch {
+                    return null // Doesn't exist, keep
+                }
+            }, 10)
+            filesToRevert.push(...results.filter((f): f is string => f !== null))
         }
 
         if (filesToRevert.length > 0) {
           let revertedInBatch = 0
-          // Revert in batches to avoid command line length issues
           const batchSize = 50
           for (let i = 0; i < filesToRevert.length; i += batchSize) {
             const batch = filesToRevert.slice(i, i + batchSize)
@@ -719,9 +623,7 @@ async getDiff(file: P4File | string): Promise<P4DiffResult> {
                 try {
                   await this.runCommand(['revert', file])
                   revertedInBatch++
-                } catch (e: any) {
-                  console.error('Error reverting file:', file, e.message)
-                }
+                } catch {}
               }
             }
           }
@@ -739,135 +641,77 @@ async getDiff(file: P4File | string): Promise<P4DiffResult> {
       }
     } catch (error: any) {
       if (error.message?.includes('not opened')) {
-        return {
-          success: true,
-          message: 'No unchanged files to revert',
-          revertedCount: 0
-        }
+        return { success: true, message: 'No unchanged files to revert', revertedCount: 0 }
       }
-      return {
-        success: false,
-        message: error.message,
-        revertedCount: 0
-      }
+      return { success: false, message: error.message, revertedCount: 0 }
     }
   }
 
   async shelve(changelist: number): Promise<{ success: boolean; message: string }> {
     try {
       const output = await this.runCommand(['shelve', '-c', String(changelist)])
-      return {
-        success: true,
-        message: output
-      }
+      return { success: true, message: output }
     } catch (error: any) {
-      return {
-        success: false,
-        message: error.message
-      }
+      return { success: false, message: error.message }
     }
   }
 
   async unshelve(changelist: number): Promise<{ success: boolean; message: string }> {
     try {
       const output = await this.runCommand(['unshelve', '-s', String(changelist)])
-      return {
-        success: true,
-        message: output
-      }
+      return { success: true, message: output }
     } catch (error: any) {
-      return {
-        success: false,
-        message: error.message
-      }
+      return { success: false, message: error.message }
     }
   }
 
-  // Delete a changelist (must be empty or use revertAndDelete)
   async deleteChangelist(changelist: number): Promise<{ success: boolean; message: string }> {
     try {
       const output = await this.runCommand(['change', '-d', String(changelist)])
-      return {
-        success: true,
-        message: output || `Changelist ${changelist} deleted`
-      }
+      return { success: true, message: output || `Changelist ${changelist} deleted` }
     } catch (error: any) {
-      return {
-        success: false,
-        message: error.message
-      }
+      return { success: false, message: error.message }
     }
   }
 
-  // Revert all files in a changelist and delete it
   async revertAndDeleteChangelist(changelist: number): Promise<{ success: boolean; message: string }> {
     try {
-      // First revert all files in this changelist
       try {
         await this.runCommand(['revert', '-c', String(changelist), '//...'])
       } catch (err: any) {
-        // Ignore "no files" error
-        if (!err.message?.includes('not opened')) {
-          throw err
-        }
+        if (!err.message?.includes('not opened')) throw err
       }
-
-      // Then delete the changelist
       const output = await this.runCommand(['change', '-d', String(changelist)])
-      return {
-        success: true,
-        message: output || `Changelist ${changelist} deleted`
-      }
+      return { success: true, message: output || `Changelist ${changelist} deleted` }
     } catch (error: any) {
-      return {
-        success: false,
-        message: error.message
-      }
+      return { success: false, message: error.message }
     }
   }
 
-  // Move files to a different changelist
   async reopenFiles(files: string[], changelist: number | 'default'): Promise<{ success: boolean; message: string }> {
     try {
       const clArg = changelist === 'default' || changelist === 0 ? 'default' : String(changelist)
-      // Quote files to handle spaces
       const quotedFiles = files.map(f => `"${f}"`)
       const output = await this.runCommand(['reopen', '-c', clArg, ...quotedFiles])
-      return {
-        success: true,
-        message: output
-      }
+      return { success: true, message: output }
     } catch (error: any) {
-      return {
-        success: false,
-        message: error.message
-      }
+      return { success: false, message: error.message }
     }
   }
 
-  // Get submitted changelists for a depot path (stream)
   async getSubmittedChanges(depotPath: string, maxChanges: number = 50): Promise<P4Changelist[]> {
     try {
       const output = await this.runCommand([
-        'changes',
-        '-s', 'submitted',
-        '-m', String(maxChanges),
-        '-l',  // long output with full description
-        depotPath
+        'changes', '-s', 'submitted', '-m', String(maxChanges), '-l', depotPath
       ])
 
-      if (!output.trim()) {
-        return []
-      }
+      if (!output.trim()) return []
 
       const changelists: P4Changelist[] = []
       const blocks = output.split(/\n(?=Change \d+)/)
 
       for (const block of blocks) {
         if (!block.trim()) continue
-
-        // Format: Change 12345 on 2024/01/01 12:34:56 by user@client
-        //         description (may be multiline)
         const headerMatch = block.match(/^Change (\d+) on (\S+)(?: (\S+))? by (\S+)@(\S+)/)
         if (headerMatch) {
           const [, number, date, time, user, client] = headerMatch
@@ -887,48 +731,34 @@ async getDiff(file: P4File | string): Promise<P4DiffResult> {
           })
         }
       }
-
       return changelists
     } catch (error) {
       return []
     }
   }
 
-  // Get the diff for a submitted changelist
   async describeChangelist(changelist: number): Promise<{
     info: P4Changelist | null
     files: Array<{ depotFile: string; action: string; revision: number }>
     diff: string
   }> {
     try {
-      // Get changelist description with unified diff
       const output = await this.runCommand(['describe', '-du', String(changelist)])
+      if (!output.trim()) return { info: null, files: [], diff: '' }
 
-      if (!output.trim()) {
-        return { info: null, files: [], diff: '' }
-      }
-
-      // Normalize line endings
       const normalizedOutput = output.replace(/\r\n/g, '\n')
-
-      // Parse header - capture date and optional time
       const headerMatch = normalizedOutput.match(/^Change (\d+) by (\S+)@(\S+) on (\S+)(?: (\S+))?/)
       let info: P4Changelist | null = null
 
       if (headerMatch) {
         const [, number, user, client, date, time] = headerMatch
         const fullDate = time ? `${date} ${time}` : date
-
-        // Get description (between header and "Affected files")
-        // Description is typically indented with tabs after a blank line
         const affectedStart = normalizedOutput.indexOf('Affected files')
         let description = ''
 
         if (affectedStart > -1) {
-          // Find first blank line after header
           const headerEnd = normalizedOutput.indexOf('\n')
           const descSection = normalizedOutput.slice(headerEnd, affectedStart)
-          // Remove leading/trailing whitespace and empty lines
           description = descSection.split('\n')
             .map(line => line.replace(/^\t+/, '').trim())
             .filter(line => line.length > 0)
@@ -945,13 +775,11 @@ async getDiff(file: P4File | string): Promise<P4DiffResult> {
         }
       }
 
-      // Parse affected files
       const files: Array<{ depotFile: string; action: string; revision: number }> = []
       const affectedMatch = normalizedOutput.match(/Affected files \.\.\.\n\n([\s\S]*?)(?=\nDifferences|$)/)
       if (affectedMatch) {
         const fileLines = affectedMatch[1].trim().split('\n')
         for (const line of fileLines) {
-          // Format: ... //depot/path/file.ext#rev action
           const fileMatch = line.match(/^\.\.\. (.+)#(\d+) (\w+)/)
           if (fileMatch) {
             files.push({
@@ -963,12 +791,9 @@ async getDiff(file: P4File | string): Promise<P4DiffResult> {
         }
       }
 
-      // Extract diff section from describe output
       const diffStart = normalizedOutput.indexOf('Differences ...')
       let diff = diffStart > -1 ? normalizedOutput.slice(diffStart) : ''
 
-      // For files without diff in describe output (binary files, Unity files, etc.),
-      // try to get diff using p4 diff2
       const filesWithDiff = new Set<string>()
       const diffFileRegex = /==== (.+?)#\d+/g
       let match
@@ -976,7 +801,6 @@ async getDiff(file: P4File | string): Promise<P4DiffResult> {
         filesWithDiff.add(match[1])
       }
 
-      // Get diffs for files that don't have diffs yet
       const missingDiffFiles = files.filter(f =>
         !filesWithDiff.has(f.depotFile) &&
         f.action !== 'delete' &&
@@ -985,40 +809,36 @@ async getDiff(file: P4File | string): Promise<P4DiffResult> {
       )
 
       if (missingDiffFiles.length > 0) {
-        const additionalDiffs: string[] = []
-
-        for (const file of missingDiffFiles) {
+        // Parallelize fetching missing diffs
+        const additionalDiffs = await pMap(missingDiffFiles, async (file) => {
           try {
-            // Use diff2 to compare previous revision with current
-            // For 'add' action, show the entire file content
             if (file.action === 'add') {
               const content = await this.runCommand(['print', '-q', `${file.depotFile}#${file.revision}`])
               if (content.trim()) {
                 const lines = content.replace(/\r\n/g, '\n').split('\n')
                 const diffContent = lines.map(line => `+${line}`).join('\n')
-                additionalDiffs.push(`\n==== ${file.depotFile}#${file.revision} (${file.action}) ====\n@@ -0,0 +1,${lines.length} @@\n${diffContent}`)
+                return `\n==== ${file.depotFile}#${file.revision} (${file.action}) ====\n@@ -0,0 +1,${lines.length} @@\n${diffContent}`
               }
             } else if (file.revision > 1) {
-              // For edit action, compare with previous revision
               const diff2Output = await this.runCommand([
                 'diff2', '-du',
                 `${file.depotFile}#${file.revision - 1}`,
                 `${file.depotFile}#${file.revision}`
               ])
               if (diff2Output.trim()) {
-                additionalDiffs.push(`\n==== ${file.depotFile}#${file.revision} (${file.action}) ====\n${diff2Output.replace(/\r\n/g, '\n')}`)
+                return `\n==== ${file.depotFile}#${file.revision} (${file.action}) ====\n${diff2Output.replace(/\r\n/g, '\n')}`
               }
             }
           } catch (err) {
-            // Skip files that can't be diffed (truly binary files)
+            return null
           }
-        }
+          return null
+        }, 5) // Concurrency limit 5
 
-        if (additionalDiffs.length > 0) {
-          if (!diff) {
-            diff = 'Differences ...\n'
-          }
-          diff += additionalDiffs.join('\n')
+        const validDiffs = additionalDiffs.filter((d): d is string => d !== null)
+        if (validDiffs.length > 0) {
+          if (!diff) diff = 'Differences ...\n'
+          diff += validDiffs.join('\n')
         }
       }
 
@@ -1028,58 +848,31 @@ async getDiff(file: P4File | string): Promise<P4DiffResult> {
     }
   }
 
-  // Get current client's stream/depot path
   async getClientStream(): Promise<string | null> {
     try {
       if (!this.currentClient) return null
-
       const output = await this.runCommand(['client', '-o', this.currentClient])
-
-      // Look for Stream: or View: line
       const streamMatch = output.match(/^Stream:\s*(\S+)/m)
-      if (streamMatch) {
-        return streamMatch[1] + '/...'
-      }
-
-      // Fall back to View mapping
+      if (streamMatch) return streamMatch[1] + '/...'
       const viewMatch = output.match(/^View:\s*\n\s*(\S+)/m)
-      if (viewMatch) {
-        return viewMatch[1]
-      }
-
+      if (viewMatch) return viewMatch[1]
       return null
     } catch (error) {
       return null
     }
   }
 
-  // Switch the current workspace to a different stream
   async switchStream(streamPath: string): Promise<{ success: boolean; message: string }> {
     try {
-      if (!this.currentClient) {
-        return { success: false, message: 'No workspace selected' }
-      }
-
-      // Use p4 client -f -s -S to switch stream
-      // The -f flag forces the switch even if files are opened.
+      if (!this.currentClient) return { success: false, message: 'No workspace selected' }
       const output = await this.runCommand(['client', '-f', '-s', '-S', streamPath, this.currentClient])
-
-      // After switching, also sync the workspace to the new stream head
       await this.sync()
-
-      return {
-        success: true,
-        message: output || `Switched to ${streamPath}`
-      }
+      return { success: true, message: output || `Switched to ${streamPath}` }
     } catch (error: any) {
-      return {
-        success: false,
-        message: error.message || 'Failed to switch stream'
-      }
+      return { success: false, message: error.message || 'Failed to switch stream' }
     }
   }
 
-  // Get depot name from current workspace
   async getCurrentDepot(): Promise<string | null> {
     try {
       const stream = await this.getClientStream()
@@ -1093,23 +886,17 @@ async getDiff(file: P4File | string): Promise<P4DiffResult> {
     }
   }
 
-  // Get Swarm URL from P4 properties
   async getSwarmUrl(): Promise<string | null> {
     try {
-      // Try to get P4.Swarm.URL property
       const output = await this.runCommand(['property', '-l', '-n', 'P4.Swarm.URL'])
-      // Output format: P4.Swarm.URL = https://swarm.myserver.com
       const match = output.match(/P4\.Swarm\.URL\s*=\s*(\S+)/)
-      if (match) {
-        return match[1]
-      }
+      if (match) return match[1]
       return null
     } catch (error) {
       return null
     }
   }
 
-  // Get file annotation (blame) - who changed each line
   async annotate(filePath: string): Promise<{
     success: boolean
     lines: Array<{
@@ -1122,17 +909,9 @@ async getDiff(file: P4File | string): Promise<P4DiffResult> {
     message?: string
   }> {
     try {
-      // Use -c for changelist, -u for user
-      // Quote the file path to handle spaces in path
-      // Output format: "changelist: user date content"
       const output = await this.runCommand(['annotate', '-c', '-u', `"${filePath}"`])
 
-      console.log('[p4 annotate] filePath:', filePath)
-      console.log('[p4 annotate] output length:', output.length)
-      console.log('[p4 annotate] first 500 chars:', output.substring(0, 500))
-
       if (!output.trim()) {
-        console.log('[p4 annotate] Empty output, returning empty lines')
         return { success: true, lines: [] }
       }
 
@@ -1144,38 +923,18 @@ async getDiff(file: P4File | string): Promise<P4DiffResult> {
         content: string
       }> = []
 
-      // Handle both Windows (CRLF) and Unix (LF) line endings
       const outputLines = output.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n')
-      console.log('[p4 annotate] Number of output lines:', outputLines.length)
-
       let lineNumber = 1
       let lastMatch: { changelist: number; user: string; date: string } | null = null
-      let matchedCount = 0
-      let skippedCount = 0
 
       for (const rawLine of outputLines) {
-        // Trim trailing whitespace but preserve leading spaces in content
         const line = rawLine.replace(/\s+$/, '')
+        if (line.startsWith('//')) continue
+        if (!line && !lastMatch) continue
 
-        // Skip file header line (starts with //)
-        if (line.startsWith('//')) {
-          skippedCount++
-          continue
-        }
-
-        // Skip empty lines at the start (before any content)
-        if (!line && !lastMatch) {
-          skippedCount++
-          continue
-        }
-
-        // Try to match annotated line: "changelist: user date content"
-        // Example: "836659: asmith 2025/11/20 using System.Collections;"
-        // The content after date might be empty for blank source lines
         const match = line.match(/^(\d+):\s+(\S+)\s+(\d{4}\/\d{2}\/\d{2})(?:\s(.*))?$/)
 
         if (match) {
-          matchedCount++
           const [, changelist, user, date, content = ''] = match
           lastMatch = {
             changelist: parseInt(changelist, 10),
@@ -1190,22 +949,11 @@ async getDiff(file: P4File | string): Promise<P4DiffResult> {
             content
           })
           lineNumber++
-        } else if (line) {
-          // Log unmatched non-empty lines for debugging
-          if (matchedCount < 5) {
-            console.log('[p4 annotate] Unmatched line:', JSON.stringify(line))
-          }
         }
       }
-
-      console.log('[p4 annotate] Matched lines:', matchedCount, 'Skipped:', skippedCount, 'Total result:', lines.length)
       return { success: true, lines }
     } catch (error: any) {
-      return {
-        success: false,
-        lines: [],
-        message: error.message
-      }
+      return { success: false, lines: [], message: error.message }
     }
   }
 
@@ -1213,7 +961,6 @@ async getDiff(file: P4File | string): Promise<P4DiffResult> {
   // Stream Graph Related Methods
   // ============================================
 
-  // Get all depots
   async getDepots(): Promise<P4Depot[]> {
     try {
       const depotsData = await this.runCommandJson<any[]>(['depots'])
@@ -1228,28 +975,19 @@ async getDiff(file: P4File | string): Promise<P4DiffResult> {
     }
   }
 
-  // Get all streams in a depot
   async getStreams(depot?: string): Promise<P4Stream[]> {
     try {
-      if (!depot) {
-        return []
-      }
-
+      if (!depot) return []
       const depots = await this.getDepots()
       const currentDepotInfo = depots.find(d => d.depot === depot)
-      // Check for 'stream' type (case-insensitive just in case)
       const isStreamDepot = currentDepotInfo?.type?.toLowerCase() === 'stream'
 
       if (isStreamDepot) {
         const depotPattern = `//${depot}/...`
-        // Use -ztag via runCommandJson for reliable parsing
         const streamsData = await this.runCommandJson<any[]>(['streams', depotPattern])
-
         return streamsData.map(s => {
           const streamPath = s.Stream || s.stream
-          // Extract name from path if Name field is missing
           const streamName = s.Name || (streamPath ? streamPath.split('/').pop() : '') || streamPath
-          
           return {
             stream: streamPath,
             name: streamName,
@@ -1262,29 +1000,20 @@ async getDiff(file: P4File | string): Promise<P4DiffResult> {
           }
         })
       } else {
-        // Fallback for classic depots: treat top-level folders as virtual streams
-        // p4 dirs doesn't support -ztag -Mj nicely in all versions or outputs simple list
-        // So we stick to text parsing for dirs
         const depotPattern = `//${depot}/*`
         const output = await this.runCommand(['dirs', depotPattern])
-
-        if (!output.trim()) {
-          return []
-        }
-
+        if (!output.trim()) return []
         const streams: P4Stream[] = []
         const lines = output.trim().split('\n')
-
         for (const line of lines) {
           const streamPath = line.trim()
-          // Ignore if line contains "no such file" or similar error text usually in stderr but sometimes stdout?
           if (streamPath && streamPath.startsWith('//')) {
             const streamName = streamPath.split('/').pop() || streamPath
             streams.push({
               stream: streamPath,
               name: streamName,
-              parent: 'none', // No parent hierarchy in classic depots
-              type: 'development', // Default type
+              parent: 'none',
+              type: 'development',
               owner: '',
               description: 'Classic depot virtual stream',
               options: '',
@@ -1300,17 +1029,14 @@ async getDiff(file: P4File | string): Promise<P4DiffResult> {
     }
   }
 
-  // Get detailed stream spec
   async getStreamSpec(streamPath: string): Promise<P4Stream | null> {
     try {
       const output = await this.runCommand(['stream', '-o', streamPath])
-
       const stream: Partial<P4Stream> = {
         stream: streamPath,
         name: streamPath.split('/').pop() || streamPath,
         depotName: streamPath.split('/')[2] || ''
       }
-
       const lines = output.split('\n')
       for (const line of lines) {
         if (line.startsWith('Parent:')) {
@@ -1325,14 +1051,12 @@ async getDiff(file: P4File | string): Promise<P4DiffResult> {
           stream.options = line.replace('Options:', '').trim()
         }
       }
-
       return stream as P4Stream
     } catch (error) {
       return null
     }
   }
 
-  // Get all workspaces (clients)
   async getAllWorkspaces(): Promise<P4Workspace[]> {
     try {
       const output = await this.runCommand(['clients'])
@@ -1342,7 +1066,6 @@ async getDiff(file: P4File | string): Promise<P4DiffResult> {
     }
   }
 
-  // Get workspaces for a specific stream
   async getWorkspacesByStream(streamPath: string): Promise<P4Workspace[]> {
     try {
       const output = await this.runCommand(['clients', '-S', streamPath])
@@ -1355,15 +1078,13 @@ async getDiff(file: P4File | string): Promise<P4DiffResult> {
   private parseWorkspacesOutput(output: string): P4Workspace[] {
     const workspaces: P4Workspace[] = []
     const lines = output.trim().split('\n')
-
     for (const line of lines) {
-      // Format: Client name date root path 'description'
       const match = line.match(/^Client\s+(\S+)\s+(\S+)\s+root\s+(\S+)\s+'(.*)'/)
       if (match) {
         const [, client, update, root, description] = match
         workspaces.push({
           client,
-          owner: '',  // Will be filled by getWorkspaceDetails if needed
+          owner: '',
           stream: '',
           root,
           host: '',
@@ -1373,18 +1094,14 @@ async getDiff(file: P4File | string): Promise<P4DiffResult> {
         })
       }
     }
-
     return workspaces
   }
 
-  // Get detailed workspace info
   async getWorkspaceDetails(clientName: string): Promise<P4Workspace | null> {
     try {
       const output = await this.runCommand(['client', '-o', clientName])
-
       const workspace: Partial<P4Workspace> = { client: clientName }
       const lines = output.split('\n')
-
       for (const line of lines) {
         if (line.startsWith('Owner:')) {
           workspace.owner = line.replace('Owner:', '').trim()
@@ -1406,19 +1123,15 @@ async getDiff(file: P4File | string): Promise<P4DiffResult> {
           workspace.submitOptions = line.replace('SubmitOptions:', '').trim()
         }
       }
-
       return workspace as P4Workspace
     } catch (error) {
       return null
     }
   }
 
-  // Get pending changes between streams (for merge/copy visualization)
   async getInterchanges(fromStream: string, toStream: string): Promise<StreamRelation> {
     try {
-      // p4 interchanges -S shows changes that need to be merged
       const output = await this.runCommand(['interchanges', '-S', fromStream, toStream])
-
       const lines = output.trim().split('\n').filter(l => l.trim() && l.startsWith('Change'))
       return {
         fromStream,
@@ -1427,7 +1140,6 @@ async getDiff(file: P4File | string): Promise<P4DiffResult> {
         pendingChanges: lines.length
       }
     } catch (error: any) {
-      // No interchanges or error
       return {
         fromStream,
         toStream,
@@ -1437,12 +1149,9 @@ async getDiff(file: P4File | string): Promise<P4DiffResult> {
     }
   }
 
-  // Get copy-up changes (from child to parent)
   async getCopyChanges(fromStream: string, toStream: string): Promise<StreamRelation> {
     try {
-      // -r flag reverses direction for copy
       const output = await this.runCommand(['interchanges', '-S', '-r', fromStream, toStream])
-
       const lines = output.trim().split('\n').filter(l => l.trim() && l.startsWith('Change'))
       return {
         fromStream,
@@ -1460,61 +1169,43 @@ async getDiff(file: P4File | string): Promise<P4DiffResult> {
     }
   }
 
-  // Get all stream relations for a depot
   async getStreamRelations(streams: P4Stream[]): Promise<StreamRelation[]> {
-    const relations: StreamRelation[] = []
-
-    for (const stream of streams) {
+    // Parallel processing with limit
+    const results = await pMap(streams, async (stream) => {
+      const relations: StreamRelation[] = []
       if (stream.parent && stream.parent !== 'none') {
-        // Check merge down (parent -> child)
-        const mergeRelation = await this.getInterchanges(stream.parent, stream.stream)
-        if (mergeRelation.pendingChanges > 0) {
-          relations.push(mergeRelation)
-        }
-
-        // Check copy up (child -> parent)
-        const copyRelation = await this.getCopyChanges(stream.stream, stream.parent)
-        if (copyRelation.pendingChanges > 0) {
-          relations.push(copyRelation)
-        }
+        const [merge, copy] = await Promise.all([
+          this.getInterchanges(stream.parent, stream.stream),
+          this.getCopyChanges(stream.stream, stream.parent)
+        ])
+        if (merge.pendingChanges > 0) relations.push(merge)
+        if (copy.pendingChanges > 0) relations.push(copy)
       }
-    }
-
-    return relations
+      return relations
+    }, 5) // Concurrency limit 5
+    return results.flat()
   }
 
-  // Get complete stream graph data for a depot
   async getStreamGraphData(depot: string): Promise<{
     streams: P4Stream[]
     workspaces: P4Workspace[]
     relations: StreamRelation[]
   }> {
     try {
-      // Get all streams in depot
       const streams = await this.getStreams(depot)
 
-      // Get workspaces with stream info
-      const workspacesMap = new Map<string, P4Workspace[]>()
-
-      for (const stream of streams) {
+      // Parallel fetch workspaces
+      const workspaceGroups = await pMap(streams, async (stream) => {
         const wsForStream = await this.getWorkspacesByStream(stream.stream)
-
-        // Get detailed info for each workspace
-        const detailedWorkspaces: P4Workspace[] = []
-        for (const ws of wsForStream) {
+        // Parallel fetch workspace details
+        const detailedWorkspaces = await pMap(wsForStream, async (ws) => {
           const details = await this.getWorkspaceDetails(ws.client)
-          if (details) {
-            detailedWorkspaces.push(details)
-          }
-        }
+          return details || ws
+        }, 5)
+        return detailedWorkspaces
+      }, 5)
 
-        workspacesMap.set(stream.stream, detailedWorkspaces)
-      }
-
-      // Flatten workspaces
-      const allWorkspaces = Array.from(workspacesMap.values()).flat()
-
-      // Get stream relations (pending merges/copies)
+      const allWorkspaces = workspaceGroups.flat()
       const relations = await this.getStreamRelations(streams)
 
       return { streams, workspaces: allWorkspaces, relations }
