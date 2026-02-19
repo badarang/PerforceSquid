@@ -12,6 +12,8 @@ const p4Api = {
   submit: (changelist: number, description: string) =>
     ipcRenderer.invoke('p4:submit', changelist, description),
   sync: (filePath?: string) => ipcRenderer.invoke('p4:sync', filePath),
+  reconcileOfflineSmart: () => ipcRenderer.invoke('p4:reconcileOfflineSmart'),
+  reconcileOfflineAll: () => ipcRenderer.invoke('p4:reconcileOfflineAll'),
   revert: (files: string[]) => ipcRenderer.invoke('p4:revert', files),
   revertUnchanged: () => ipcRenderer.invoke('p4:revertUnchanged'),
   shelve: (changelist: number) => ipcRenderer.invoke('p4:shelve', changelist),
@@ -24,6 +26,8 @@ const p4Api = {
   switchStream: (streamPath: string) => ipcRenderer.invoke('p4:switchStream', streamPath),
   getCurrentDepot: () => ipcRenderer.invoke('p4:getCurrentDepot'),
   getSwarmUrl: () => ipcRenderer.invoke('p4:getSwarmUrl'),
+  createSwarmReview: (changelist: number, reviewers: string[]) => ipcRenderer.invoke('p4:createSwarmReview', changelist, reviewers),
+  getUsers: () => ipcRenderer.invoke('p4:users'),
   reopenFiles: (files: string[], changelist: number | 'default') =>
     ipcRenderer.invoke('p4:reopenFiles', files, changelist),
   createChangelist: (description: string) =>
@@ -61,11 +65,22 @@ const dialogApi = {
   openDirectory: () => ipcRenderer.invoke('dialog:openDirectory'),
 }
 
+const jiraApi = {
+  getPath: () => ipcRenderer.invoke('jira:getPath'),
+  setPath: (targetPath: string) => ipcRenderer.invoke('jira:setPath', targetPath),
+  getStatus: () => ipcRenderer.invoke('jira:getStatus'),
+  recommend: (project: string, limit?: number) => ipcRenderer.invoke('jira:recommend', project, limit),
+  similar: (ticketOrUrl: string, threshold?: number) => ipcRenderer.invoke('jira:similar', ticketOrUrl, threshold),
+  openInChrome: (targetUrl: string) => ipcRenderer.invoke('jira:openInChrome', targetUrl),
+}
+
 contextBridge.exposeInMainWorld('p4', p4Api)
 contextBridge.exposeInMainWorld('settings', settingsApi)
 contextBridge.exposeInMainWorld('dialog', dialogApi)
+contextBridge.exposeInMainWorld('jira', jiraApi)
 
 // Type declaration for renderer
 export type P4Api = typeof p4Api
 export type SettingsApi = typeof settingsApi
 export type DialogApi = typeof dialogApi
+export type JiraApi = typeof jiraApi

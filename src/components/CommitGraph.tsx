@@ -62,37 +62,88 @@ function getStreamColor(streamType: string, streamName: string): string {
 
 function formatRelativeDate(dateStr: string | undefined): string {
   if (!dateStr) return ''
-  const parts = dateStr.split(' ')
-  const datePart = parts[0]
-  const [year, month, day] = datePart.split('/')
-  const date = new Date(parseInt(year), parseInt(month) - 1, parseInt(day))
-  const now = new Date()
-  const diffMs = now.getTime() - date.getTime()
+
+  const hasTime = /\d{1,2}:\d{1,2}(?::\d{1,2})?$/.test(dateStr.trim())
+  const timestamp = parseDate(dateStr)
+  if (!timestamp) return ''
+
+  const kstDate = new Date(timestamp + 9 * 60 * 60 * 1000)
+  const kstHour = String(kstDate.getUTCHours()).padStart(2, '0')
+  const kstMinute = String(kstDate.getUTCMinutes()).padStart(2, '0')
+  const kstTimeLabel = `${kstHour}:${kstMinute}`
+
+  if (!hasTime) {
+    const dayMs = 24 * 60 * 60 * 1000
+    const nowShifted = new Date(Date.now() + 9 * 60 * 60 * 1000)
+    const nowDayUtc = Date.UTC(
+      nowShifted.getUTCFullYear(),
+      nowShifted.getUTCMonth(),
+      nowShifted.getUTCDate()
+    )
+    const dateDayUtc = Date.UTC(
+      kstDate.getUTCFullYear(),
+      kstDate.getUTCMonth(),
+      kstDate.getUTCDate()
+    )
+    const diffDays = Math.floor((nowDayUtc - dateDayUtc) / dayMs)
+
+    if (diffDays <= 0) return `TODAY ${kstTimeLabel}`
+    if (diffDays === 1) return `YESTERDAY ${kstTimeLabel}`
+    if (diffDays < 7) return `${diffDays}d ago`
+    if (diffDays < 30) return `${Math.floor(diffDays / 7)}w ago`
+    if (diffDays < 365) return `${Math.floor(diffDays / 30)}mo ago`
+    return `${Math.floor(diffDays / 365)}y ago`
+  }
+
+  const diffMs = Date.now() - timestamp
   const diffMins = Math.floor(diffMs / (1000 * 60))
   const diffHours = Math.floor(diffMs / (1000 * 60 * 60))
   const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24))
 
-  if (diffMins < 1) return 'just now'
+  if (diffMins < 1) return `TODAY ${kstTimeLabel}`
   if (diffMins < 60) return `${diffMins}m ago`
-  if (diffHours < 24) return `${diffHours}h ago`
-  if (diffDays === 1) return 'yesterday'
+  if (diffHours < 24) {
+    const nowShifted = new Date(Date.now() + 9 * 60 * 60 * 1000)
+    const sameKstDay =
+      nowShifted.getUTCFullYear() === kstDate.getUTCFullYear() &&
+      nowShifted.getUTCMonth() === kstDate.getUTCMonth() &&
+      nowShifted.getUTCDate() === kstDate.getUTCDate()
+    if (sameKstDay) return `TODAY ${kstTimeLabel}`
+    return `${diffHours}h ago`
+  }
+  if (diffDays === 1) return `YESTERDAY ${kstTimeLabel}`
   if (diffDays < 7) return `${diffDays}d ago`
   if (diffDays < 30) return `${Math.floor(diffDays / 7)}w ago`
   if (diffDays < 365) return `${Math.floor(diffDays / 30)}mo ago`
   return `${Math.floor(diffDays / 365)}y ago`
 }
 
-function parseDate(dateStr: string | undefined): number {
+function parsePerforceDateAsKst(dateStr: string | undefined): number {
   if (!dateStr) return 0
-  const parts = dateStr.split(' ')
+
+  const parts = dateStr.trim().split(/\s+/)
   const datePart = parts[0]
   const timePart = parts[1] || '00:00:00'
-  const [year, month, day] = datePart.split('/')
-  const [hour, min, sec] = timePart.split(':')
-  return new Date(
-    parseInt(year), parseInt(month) - 1, parseInt(day),
-    parseInt(hour) || 0, parseInt(min) || 0, parseInt(sec) || 0
-  ).getTime()
+
+  const dateMatch = datePart.match(/^(\d{4})[\/-](\d{1,2})[\/-](\d{1,2})$/)
+  if (!dateMatch) return 0
+
+  const [, yearRaw, monthRaw, dayRaw] = dateMatch
+  const timeMatch = timePart.match(/^(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?$/)
+
+  const year = parseInt(yearRaw, 10)
+  const month = parseInt(monthRaw, 10)
+  const day = parseInt(dayRaw, 10)
+  const hour = timeMatch ? parseInt(timeMatch[1], 10) : 0
+  const min = timeMatch ? parseInt(timeMatch[2], 10) : 0
+  const sec = timeMatch && timeMatch[3] ? parseInt(timeMatch[3], 10) : 0
+
+  // Perforce date strings are interpreted as Korea Standard Time (UTC+9).
+  return Date.UTC(year, month - 1, day, hour - 9, min, sec)
+}
+
+function parseDate(dateStr: string | undefined): number {
+  return parsePerforceDateAsKst(dateStr)
 }
 
 interface GraphNode {

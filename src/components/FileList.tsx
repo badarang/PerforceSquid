@@ -63,6 +63,11 @@ export function FileList() {
   const allChecked = filteredFiles.length > 0 && checkedCount === filteredFiles.length
   const someChecked = checkedCount > 0 && checkedCount < filteredFiles.length
 
+  const currentChangelistObj = changelists.find(c => 
+    (selectedChangelist === 'default' && c.number === 0) || c.number === selectedChangelist
+  )
+  const isReviewRequested = currentChangelistObj?.description.includes('#review') || (!!currentChangelistObj?.reviewId)
+
   const getFileName = (path: string) => {
     // Strip trailing separators and split
     const parts = path.replace(/[/\\]+$/, '').split(/[/\\]/)
@@ -667,8 +672,8 @@ export function FileList() {
                   <span className="text-gray-400 text-xs">
                     {isShelvedExpanded ? '▼' : '▶'}
                   </span>
-                  <span className="text-xs font-semibold text-yellow-500/80 uppercase tracking-wider">
-                    Shelved Files
+                  <span className={`text-xs font-semibold uppercase tracking-wider ${isReviewRequested ? 'text-purple-400' : 'text-yellow-500/80'}`}>
+                    {isReviewRequested ? 'Shelved Files (Requested)' : 'Shelved Files'}
                   </span>
                   <span className="text-xs text-gray-500 bg-gray-800 px-1.5 rounded-full">
                     {shelvedFiles.length}

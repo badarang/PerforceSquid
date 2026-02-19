@@ -1,10 +1,43 @@
-import { app, BrowserWindow, ipcMain } from 'electron'
+import { app, BrowserWindow, ipcMain, shell } from 'electron'
 import path from 'path'
 import { P4Service } from './p4/p4Service'
+import { JiraService } from './jira/jiraService'
+import fs from 'fs'
+import { spawn } from 'child_process'
 
 let mainWindow: BrowserWindow | null = null
 const p4Service = new P4Service()
-import fs from 'fs'
+const jiraService = new JiraService()
+
+interface IntegrationSettings {
+  jiraBotPath?: string
+}
+
+function getIntegrationSettingsPath(): string {
+  return path.join(app.getPath('userData'), 'integration-settings.json')
+}
+
+function loadIntegrationSettings(): IntegrationSettings {
+  const settingsPath = getIntegrationSettingsPath()
+  try {
+    if (!fs.existsSync(settingsPath)) {
+      return {}
+    }
+    const raw = fs.readFileSync(settingsPath, 'utf8')
+    return JSON.parse(raw) as IntegrationSettings
+  } catch {
+    return {}
+  }
+}
+
+function saveIntegrationSettings(settings: IntegrationSettings): void {
+  const settingsPath = getIntegrationSettingsPath()
+  try {
+    fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2), 'utf8')
+  } catch {
+    // Ignore persistence errors
+  }
+}
 
 function createWindow() {
   const isDev = process.env.VITE_DEV_SERVER_URL;
@@ -69,7 +102,13 @@ function createWindow() {
   })
 }
 
-app.whenReady().then(createWindow)
+app.whenReady().then(() => {
+  const settings = loadIntegrationSettings()
+  if (settings.jiraBotPath) {
+    jiraService.setPath(settings.jiraBotPath)
+  }
+  createWindow()
+})
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
@@ -125,6 +164,14 @@ ipcMain.handle('p4:sync', async (_, filePath?: string) => {
   return p4Service.sync(filePath)
 })
 
+ipcMain.handle('p4:reconcileOfflineSmart', async () => {
+  return p4Service.reconcileOfflineSmart()
+})
+
+ipcMain.handle('p4:reconcileOfflineAll', async () => {
+  return p4Service.reconcileOfflineAll()
+})
+
 ipcMain.handle('p4:revert', async (_, files: string[]) => {
   return p4Service.revert(files)
 })
@@ -163,6 +210,14 @@ ipcMain.handle('p4:getCurrentDepot', async () => {
 
 ipcMain.handle('p4:getSwarmUrl', async () => {
   return p4Service.getSwarmUrl()
+})
+
+ipcMain.handle('p4:createSwarmReview', async (_, changelist: number, reviewers: string[]) => {
+  return p4Service.createSwarmReview(changelist, reviewers)
+})
+
+ipcMain.handle('p4:users', async () => {
+  return p4Service.getUsers()
 })
 
 ipcMain.handle('p4:reopenFiles', async (_, files: string[], changelist: number | 'default') => {
@@ -259,6 +314,50 @@ ipcMain.handle('settings:setAutoLaunch', (_, enabled: boolean) => {
     path: app.getPath('exe')
   })
   return { success: true }
+})
+
+// JiraBot IPC Handlers
+ipcMain.handle('jira:getPath', async () => {
+  return jiraService.getPath()
+})
+
+ipcMain.handle('jira:setPath', async (_, targetPath: string) => {
+  jiraService.setPath(targetPath)
+  saveIntegrationSettings({ jiraBotPath: targetPath })
+  return { success: true }
+})
+
+ipcMain.handle('jira:getStatus', async () => {
+  return jiraService.getStatus()
+})
+
+ipcMain.handle('jira:recommend', async (_, project: string, limit: number = 10) => {
+  return jiraService.recommend(project, limit)
+})
+
+ipcMain.handle('jira:similar', async (_, ticketOrUrl: string, threshold: number = 0.3) => {
+  return jiraService.similar(ticketOrUrl, threshold)
+})
+
+ipcMain.handle('jira:openInChrome', async (_, targetUrl: string) => {
+  const chromeCandidates = [
+    'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+    'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+    path.join(process.env.LOCALAPPDATA || '', 'Google\\Chrome\\Application\\chrome.exe'),
+  ].filter(Boolean)
+
+  const chromePath = chromeCandidates.find((candidate) => fs.existsSync(candidate))
+  if (chromePath) {
+    const child = spawn(chromePath, [targetUrl], {
+      detached: true,
+      stdio: 'ignore',
+    })
+    child.unref()
+    return { success: true }
+  }
+
+  await shell.openExternal(targetUrl)
+  return { success: true, fallback: true }
 })
 
 // Dialog Handlers

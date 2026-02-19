@@ -24,6 +24,7 @@
 | **Shelving** | Shelve and unshelve changes |
 | **History** | Browse submitted changelist history |
 | **Blame/Annotate** | See who changed each line |
+| **JiraBot Integration** | Run Jira recommendations/similarity checks from the app |
 
 ---
 
@@ -132,6 +133,14 @@ The app uses your existing Perforce environment variables:
 | `P4PORT` | Perforce server address |
 | `P4USER` | Perforce username |
 | `P4CLIENT` | Default workspace/client |
+
+Jira integration uses a local `jirabot` folder (default: sibling path `../jirabot`).
+
+You can also set a custom path with:
+
+| Variable | Description |
+|----------|-------------|
+| `JIRABOT_PATH` | Absolute path to your JiraBot project |
 
 ---
 

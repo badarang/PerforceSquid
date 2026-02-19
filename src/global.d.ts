@@ -24,6 +24,8 @@ interface P4Api {
   getChangelists: () => Promise<P4Changelist[]>
   submit: (changelist: number, description: string) => Promise<{ success: boolean; message: string }>
   sync: (filePath?: string) => Promise<{ success: boolean; message: string }>
+  reconcileOfflineSmart: () => Promise<{ success: boolean; message: string; mode: 'smart' | 'full'; files: string[] }>
+  reconcileOfflineAll: () => Promise<{ success: boolean; message: string; mode: 'smart' | 'full'; files: string[] }>
   revert: (files: string[]) => Promise<{ success: boolean; message: string }>
   revertUnchanged: () => Promise<{ success: boolean; message: string; revertedCount: number }>
   shelve: (changelist: number, files?: string[]) => Promise<{ success: boolean; message: string }>
@@ -39,6 +41,8 @@ interface P4Api {
   switchStream: (streamPath: string) => Promise<{ success: boolean; message: string }>
   getCurrentDepot: () => Promise<string | null>
   getSwarmUrl: () => Promise<string | null>
+  createSwarmReview: (changelist: number, reviewers: string[]) => Promise<{ success: boolean; review?: any; message?: string }>
+  getUsers: () => Promise<string[]>
   reopenFiles: (files: string[], changelist: number | 'default') => Promise<{ success: boolean; message: string }>
   createChangelist: (description: string) => Promise<{ success: boolean; changelistNumber: number; message: string }>
   editChangelist: (changelist: number, description: string) => Promise<{ success: boolean; message: string }>
@@ -79,11 +83,36 @@ interface DialogApi {
   openDirectory: () => Promise<string | null>
 }
 
+interface JiraStatus {
+  configuredPath: string
+  exists: boolean
+  hasMainScript: boolean
+  pythonAvailable: boolean
+  jiraBaseUrl?: string
+  message: string
+}
+
+interface JiraCommandResult {
+  success: boolean
+  output: string
+  error?: string
+}
+
+interface JiraApi {
+  getPath: () => Promise<string>
+  setPath: (targetPath: string) => Promise<{ success: boolean }>
+  getStatus: () => Promise<JiraStatus>
+  recommend: (project: string, limit?: number) => Promise<JiraCommandResult>
+  similar: (ticketOrUrl: string, threshold?: number) => Promise<JiraCommandResult>
+  openInChrome: (targetUrl: string) => Promise<{ success: boolean; fallback?: boolean }>
+}
+
 declare global {
   interface Window {
     p4: P4Api
     settings: SettingsApi
     dialog: DialogApi
+    jira: JiraApi
   }
 }
 

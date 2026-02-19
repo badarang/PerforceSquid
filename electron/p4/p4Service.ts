@@ -28,6 +28,13 @@ export interface P4Client {
   description: string
 }
 
+interface ReconcileResult {
+  success: boolean
+  message: string
+  mode: 'smart' | 'full'
+  files: string[]
+}
+
 export class P4Service {
   private currentClient: string | null = null
   private cachedInfo: P4Info | null = null
@@ -171,6 +178,16 @@ export class P4Service {
 
       return clients
     } catch (error) {
+      return []
+    }
+  }
+
+  async getUsers(): Promise<string[]> {
+    try {
+      const users = await this.runCommandJson<any[]>(['users'])
+      return users.map(u => u.User).filter(Boolean).sort()
+    } catch (error) {
+      console.error('getUsers failed:', error)
       return []
     }
   }
@@ -325,7 +342,7 @@ export class P4Service {
         filePath: depotPath,
         oldContent,
         newContent,
-        hunks: diffOutput
+        hunks: this.normalizeDiffOutput(diffOutput)
       }
     } catch (error: any) {
       if (error.message?.includes('not opened') || error.message?.includes('no differing files')) {
@@ -340,46 +357,206 @@ export class P4Service {
     }
   }
 
+  private normalizeDiffOutput(raw: string): string {
+    const normalized = raw.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+    const withoutPreamble = normalized
+      .split('\n')
+      .filter((line) => line.trim() !== 'Differences ...')
+      .join('\n')
+    const trimmed = withoutPreamble.trim()
+    if (!trimmed) return ''
+
+    // Guard against accidental full duplication: [A][A]
+    if (trimmed.length % 2 === 0) {
+      const half = trimmed.length / 2
+      const first = trimmed.slice(0, half).trim()
+      const second = trimmed.slice(half).trim()
+      if (first && first === second) {
+        return first
+      }
+    }
+
+    // Guard against duplicated repeated block sequences (e.g. A,B,A,B)
+    const blocks = this.splitDiffBlocks(trimmed)
+    if (blocks.length > 1) {
+      // 1) Remove adjacent duplicates first
+      const dedupedAdjacent: string[] = []
+      for (const block of blocks) {
+        const prev = dedupedAdjacent[dedupedAdjacent.length - 1]
+        if (prev !== block) {
+          dedupedAdjacent.push(block)
+        }
+      }
+      if (dedupedAdjacent.length < blocks.length) {
+        return dedupedAdjacent.join('\n\n')
+      }
+
+      // 2) Collapse repeated sequence patterns (A,B,A,B) -> (A,B)
+      const n = blocks.length
+      for (let period = 1; period <= Math.floor(n / 2); period++) {
+        if (n % period !== 0) continue
+        let repeated = true
+        for (let i = period; i < n; i++) {
+          if (blocks[i] !== blocks[i % period]) {
+            repeated = false
+            break
+          }
+        }
+        if (repeated) {
+          const reduced = blocks.slice(0, period)
+          if (reduced.length < blocks.length) {
+            return reduced.join('\n\n')
+          }
+        }
+      }
+    }
+
+    return trimmed
+  }
+
+  private splitDiffBlocks(diffText: string): string[] {
+    const lines = diffText.split('\n')
+    const blocks: string[] = []
+    let current: string[] = []
+
+    const flush = () => {
+      const block = current.join('\n').trim()
+      if (block) blocks.push(block)
+      current = []
+    }
+
+    for (const line of lines) {
+      if (line.startsWith('==== ') && current.length > 0) {
+        flush()
+      }
+      current.push(line)
+    }
+    flush()
+
+    return blocks
+  }
+
+  private async enrichWithSwarmReviews(changelists: P4Changelist[]): Promise<P4Changelist[]> {
+    try {
+      const pendingIds = changelists
+        .filter(c => c.status === 'pending' && c.number > 0)
+        .map(c => c.number)
+      
+      if (pendingIds.length === 0) return changelists
+
+      const swarmUrl = await this.getSwarmUrl()
+      if (!swarmUrl) return changelists
+
+      const info = await this.getInfo()
+      const user = info.userName
+      const ticket = await this.getTicket()
+
+      if (!user || !ticket) return changelists
+
+      // Fetch reviews for these changes
+      const query = new URLSearchParams()
+      query.append('max', String(pendingIds.length * 2)) // Fetch enough
+      pendingIds.forEach(id => query.append('change[]', String(id)))
+      
+      const cleanUrl = swarmUrl.replace(/\/$/, '')
+      const apiUrl = `${cleanUrl}/api/v9/reviews?${query.toString()}`
+
+      const auth = Buffer.from(`${user}:${ticket}`).toString('base64')
+      
+      // 2 second timeout to keep UI snappy
+      const controller = new AbortController()
+      const timeout = setTimeout(() => controller.abort(), 2000)
+
+      const response = await fetch(apiUrl, {
+        headers: { 'Authorization': `Basic ${auth}` },
+        signal: controller.signal
+      })
+      clearTimeout(timeout)
+
+      if (!response.ok) return changelists
+
+      const data = await response.json()
+      const reviews = data.reviews || []
+      
+      // Map change ID to review
+      const changeReviewMap = new Map<number, { id: number, state: string }>()
+      
+      for (const review of reviews) {
+        if (review.changes) {
+          for (const changeId of review.changes) {
+            // We want the review where this change is the active one or part of it
+            changeReviewMap.set(Number(changeId), { id: review.id, state: review.state })
+          }
+        }
+      }
+
+      return changelists.map(cl => {
+        const review = changeReviewMap.get(cl.number)
+        if (review) {
+          return { ...cl, reviewId: review.id, reviewStatus: review.state }
+        }
+        return cl
+      })
+    } catch (error) {
+      // Swarm enrichment is optional, don't fail operation
+      return changelists
+    }
+  }
+
   async getChangelists(): Promise<P4Changelist[]> {
     try {
       const info = await this.getInfo()
-      const output = await this.runCommand(['changes', '-s', 'pending', '-c', info.clientName])
+      // Use -l for long output to get full descriptions
+      const output = await this.runCommand(['changes', '-l', '-s', 'pending', '-c', info.clientName])
+
+      let changelists: P4Changelist[] = []
 
       if (!output.trim()) {
-        return [{
+        changelists = [{
           number: 0,
           status: 'pending',
           description: 'Default changelist',
           user: info.userName,
           client: info.clientName
         }]
-      }
+      } else {
+        changelists = [{
+          number: 0,
+          status: 'pending',
+          description: 'Default changelist',
+          user: info.userName,
+          client: info.clientName
+        }]
 
-      const changelists: P4Changelist[] = [{
-        number: 0,
-        status: 'pending',
-        description: 'Default changelist',
-        user: info.userName,
-        client: info.clientName
-      }]
+        const changeHeaderRegex = /^Change (\d+) on (\S+) by (\S+)@(\S+) \*pending\*/
+        
+        const entries = output.split(/(?=^Change \d+ on)/m).filter(e => e.trim())
 
-      const lines = output.trim().split('\n')
-      for (const line of lines) {
-        const match = line.match(/^Change (\d+) on (\S+) by (\S+)@(\S+) \*pending\* '(.+)'/)
-        if (match) {
-          const [, number, date, user, client, description] = match
-          changelists.push({
-            number: parseInt(number, 10),
-            status: 'pending',
-            description: description,
-            user,
-            client,
-            date
-          })
+        for (const entry of entries) {
+          const lines = entry.trim().split('\n')
+          const header = lines[0]
+          const match = header.match(changeHeaderRegex)
+          
+          if (match) {
+            const [, number, date, user, client] = match
+            // Description is everything after the first line
+            const description = lines.slice(1).join('\n').trim()
+            
+            changelists.push({
+              number: parseInt(number, 10),
+              status: 'pending',
+              description: description,
+              user,
+              client,
+              date
+            })
+          }
         }
       }
+      
+      // Enrich with Swarm Data
+      return await this.enrichWithSwarmReviews(changelists)
 
-      return changelists
     } catch (error) {
       return [{
         number: 0,
@@ -435,7 +612,7 @@ export class P4Service {
       for (const line of lines) {
         if (line.startsWith('Description:')) {
           newLines.push('Description:')
-          const descLines = description.trim().split('\n')
+          const descLines = description.replace(/\r\n/g, '\n').trim().split('\n')
           for (const d of descLines) {
             newLines.push(`\t${d}`)
           }
@@ -451,7 +628,10 @@ export class P4Service {
       const newSpec = newLines.join('\n')
       const output = await this.runCommand(['change', '-i'], newSpec)
       
-      return { success: true, message: output }
+      if (output.includes('updated')) {
+        return { success: true, message: output }
+      }
+      return { success: false, message: `Failed to update changelist: ${output}` }
     } catch (error: any) {
       return { success: false, message: error.message }
     }
@@ -490,6 +670,62 @@ export class P4Service {
       return { success: true, message: output || 'Already up to date' }
     } catch (error: any) {
       return { success: false, message: error.message }
+    }
+  }
+
+  private quotePath(value: string): string {
+    return `"${value.replace(/"/g, '\\"')}"`
+  }
+
+  async reconcileOfflineSmart(): Promise<ReconcileResult> {
+    try {
+      const info = await this.getInfo()
+      const clientRoot = info.clientRoot
+      if (!clientRoot) {
+        return {
+          success: false,
+          message: 'Client root not found.',
+          mode: 'smart',
+          files: []
+        }
+      }
+
+      const scriptsRoot = `${clientRoot}\\Assets\\Scripts`
+      const scriptsPattern = `${scriptsRoot}\\...`
+      const args = ['reconcile', '-e', '-a', '-d', this.quotePath(scriptsPattern)]
+      const output = await this.runCommand(args)
+      return {
+        success: true,
+        message: output || 'Reconciled Assets/Scripts.',
+        mode: 'smart',
+        files: [scriptsPattern]
+      }
+    } catch (error: any) {
+      return {
+        success: false,
+        message: error.message || 'Smart reconcile failed.',
+        mode: 'smart',
+        files: []
+      }
+    }
+  }
+
+  async reconcileOfflineAll(): Promise<ReconcileResult> {
+    try {
+      const output = await this.runCommand(['reconcile', '-e', '-a', '-d', '//...'])
+      return {
+        success: true,
+        message: output || 'Reconcile completed for entire workspace.',
+        mode: 'full',
+        files: ['//...']
+      }
+    } catch (error: any) {
+      return {
+        success: false,
+        message: error.message || 'Full reconcile failed.',
+        mode: 'full',
+        files: ['//...']
+      }
     }
   }
 
@@ -702,7 +938,7 @@ export class P4Service {
   async getSubmittedChanges(depotPath: string, maxChanges: number = 50): Promise<P4Changelist[]> {
     try {
       const output = await this.runCommand([
-        'changes', '-s', 'submitted', '-m', String(maxChanges), '-l', depotPath
+        'changes', '-s', 'submitted', '-m', String(maxChanges), '-l', '-t', depotPath
       ])
 
       if (!output.trim()) return []
@@ -742,8 +978,7 @@ export class P4Service {
     files: Array<{ depotFile: string; action: string; revision: number }>
     diff: string
   }> {
-    try {
-      const output = await this.runCommand(['describe', '-du', String(changelist)])
+    const parseDescribeOutput = (output: string) => {
       if (!output.trim()) return { info: null, files: [], diff: '' }
 
       const normalizedOutput = output.replace(/\r\n/g, '\n')
@@ -753,16 +988,28 @@ export class P4Service {
       if (headerMatch) {
         const [, number, user, client, date, time] = headerMatch
         const fullDate = time ? `${date} ${time}` : date
-        const affectedStart = normalizedOutput.indexOf('Affected files')
+        
         let description = ''
-
-        if (affectedStart > -1) {
+        const affectedIndex = normalizedOutput.indexOf('Affected files')
+        const shelvedIndex = normalizedOutput.indexOf('Shelved files')
+        
+        let sectionStart = -1
+        if (affectedIndex > -1 && shelvedIndex > -1) sectionStart = Math.min(affectedIndex, shelvedIndex)
+        else if (affectedIndex > -1) sectionStart = affectedIndex
+        else if (shelvedIndex > -1) sectionStart = shelvedIndex
+        
+        if (sectionStart > -1) {
           const headerEnd = normalizedOutput.indexOf('\n')
-          const descSection = normalizedOutput.slice(headerEnd, affectedStart)
+          const descSection = normalizedOutput.slice(headerEnd, sectionStart)
           description = descSection.split('\n')
             .map(line => line.replace(/^\t+/, '').trim())
             .filter(line => line.length > 0)
             .join(' ')
+        } else {
+             const headerEnd = normalizedOutput.indexOf('\n')
+             if (headerEnd > -1) {
+                 description = normalizedOutput.slice(headerEnd).trim()
+             }
         }
 
         info = {
@@ -776,23 +1023,58 @@ export class P4Service {
       }
 
       const files: Array<{ depotFile: string; action: string; revision: number }> = []
-      const affectedMatch = normalizedOutput.match(/Affected files \.\.\.\n\n([\s\S]*?)(?=\nDifferences|$)/)
-      if (affectedMatch) {
-        const fileLines = affectedMatch[1].trim().split('\n')
-        for (const line of fileLines) {
-          const fileMatch = line.match(/^\.\.\. (.+)#(\d+) (\w+)/)
-          if (fileMatch) {
-            files.push({
-              depotFile: fileMatch[1],
-              action: fileMatch[3],
-              revision: parseInt(fileMatch[2], 10)
-            })
+      
+      const extractFiles = (regex: RegExp) => {
+          const match = normalizedOutput.match(regex)
+          if (match) {
+            const fileLines = match[1].trim().split('\n')
+            for (const line of fileLines) {
+              const fileMatch = line.match(/^\.\.\. (.+)#(\d+) (\w+)/)
+              if (fileMatch) {
+                files.push({
+                  depotFile: fileMatch[1],
+                  action: fileMatch[3],
+                  revision: parseInt(fileMatch[2], 10)
+                })
+              }
+            }
           }
-        }
       }
+
+      extractFiles(/Affected files \.\.\.\n\n([\s\S]*?)(?=\nDifferences|$|Shelved files)/)
+      extractFiles(/Shelved files \.\.\.\n\n([\s\S]*?)(?=\nDifferences|$|Affected files)/)
 
       const diffStart = normalizedOutput.indexOf('Differences ...')
       let diff = diffStart > -1 ? normalizedOutput.slice(diffStart) : ''
+
+      return { info, files, diff }
+    }
+
+    try {
+      const [stdOutput, shelvedOutput] = await Promise.all([
+        this.runCommand(['describe', '-du', String(changelist)]).catch(() => ''),
+        this.runCommand(['describe', '-S', '-du', String(changelist)]).catch(() => '')
+      ])
+
+      const stdResult = parseDescribeOutput(stdOutput)
+      const shelvedResult = parseDescribeOutput(shelvedOutput)
+
+      const info = stdResult.info || shelvedResult.info
+      
+      const fileMap = new Map<string, { depotFile: string; action: string; revision: number }>()
+      stdResult.files.forEach(f => fileMap.set(f.depotFile, f))
+      shelvedResult.files.forEach(f => fileMap.set(f.depotFile, f))
+      const files = Array.from(fileMap.values())
+
+      let diff = stdResult.diff
+      if (shelvedResult.diff) {
+        if (diff) {
+             const shelvedDiffContent = shelvedResult.diff.replace('Differences ...\n', '')
+             diff += '\n' + shelvedDiffContent
+        } else {
+            diff = shelvedResult.diff
+        }
+      }
 
       const filesWithDiff = new Set<string>()
       const diffFileRegex = /==== (.+?)#\d+/g
@@ -805,11 +1087,11 @@ export class P4Service {
         !filesWithDiff.has(f.depotFile) &&
         f.action !== 'delete' &&
         f.action !== 'branch' &&
-        f.action !== 'integrate'
+        f.action !== 'integrate' &&
+        f.action !== 'move/delete'
       )
 
       if (missingDiffFiles.length > 0) {
-        // Parallelize fetching missing diffs
         const additionalDiffs = await pMap(missingDiffFiles, async (file) => {
           try {
             if (file.action === 'add') {
@@ -833,7 +1115,7 @@ export class P4Service {
             return null
           }
           return null
-        }, 5) // Concurrency limit 5
+        }, 5)
 
         const validDiffs = additionalDiffs.filter((d): d is string => d !== null)
         if (validDiffs.length > 0) {
@@ -842,7 +1124,8 @@ export class P4Service {
         }
       }
 
-      return { info, files, diff }
+      const normalizedDiff = this.normalizeDiffOutput(diff)
+      return { info, files, diff: normalizedDiff }
     } catch (error) {
       return { info: null, files: [], diff: '' }
     }
@@ -894,6 +1177,84 @@ export class P4Service {
       return null
     } catch (error) {
       return null
+    }
+  }
+
+  async getTicket(): Promise<string | null> {
+    try {
+      // Read ticket from 'p4 tickets' - this just reads the ticket file without auth attempts
+      const output = await this.runCommand(['tickets'])
+      if (!output.trim()) return null
+
+      // Parse ticket output format: "serverAddress (user) = ticketValue"
+      // Example: "ssl:perforce.example.com:1666 (hoh) = 5A4B3C2D1E0F..."
+      const lines = output.trim().split('\n')
+      for (const line of lines) {
+        const match = line.match(/=\s*([A-F0-9]+)\s*$/i)
+        if (match) {
+          return match[1]
+        }
+      }
+      return null
+    } catch (error) {
+      return null
+    }
+  }
+
+  async createSwarmReview(changelist: number, reviewers: string[] = []): Promise<{ success: boolean; review?: any; message?: string }> {
+    try {
+      const swarmUrl = await this.getSwarmUrl()
+      if (!swarmUrl) {
+        return { success: false, message: 'Swarm URL not configured (P4.Swarm.URL)' }
+      }
+
+      const info = await this.getInfo()
+      const user = info.userName
+      const ticket = await this.getTicket()
+
+      if (!user || !ticket) {
+        return { success: false, message: 'Authentication failed: User or ticket not found' }
+      }
+
+      // Format reviewers: Swarm API expects array of strings, or object with 'users' and 'groups'
+      // But typically just a list of IDs for the 'reviewers' field works for users.
+      // If we have groups, we might need to handle them.
+      // The user provided list might contain groups with @@ prefix if they followed the UI hint,
+      // but usually the API expects separate fields or simple strings.
+      // Let's assume passed reviewers are user IDs for now or handle basic formatting.
+      
+      const formData = new URLSearchParams()
+      formData.append('change', String(changelist))
+      formData.append('description', 'Review from PerforceSquid') // Optional, Swarm uses CL desc if omitted
+      
+      reviewers.forEach(r => formData.append('reviewers[]', r))
+
+      // Clean URL
+      const cleanUrl = swarmUrl.replace(/\/$/, '')
+      const apiUrl = `${cleanUrl}/api/v9/reviews`
+      
+      const auth = Buffer.from(`${user}:${ticket}`).toString('base64')
+
+      const response = await fetch(apiUrl, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Basic ${auth}`,
+          'Content-Type': 'application/x-www-form-urlencoded'
+        },
+        body: formData
+      })
+
+      if (!response.ok) {
+        const text = await response.text()
+        return { success: false, message: `Swarm API Error: ${response.status} ${text}` }
+      }
+
+      const data = await response.json()
+      // Swarm v9 returns { review: { id: 123, ... } }
+      
+      return { success: true, review: data.review }
+    } catch (error: any) {
+      return { success: false, message: error.message }
     }
   }
 

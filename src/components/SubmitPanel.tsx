@@ -156,15 +156,11 @@ export function SubmitPanel() {
     }
   }
 
-  const [showReviewModal, setShowReviewModal] = useState(false)
-  const [reviewers, setReviewers] = useState(() => localStorage.getItem('p4_reviewers') || '')
-  const [groups, setGroups] = useState(() => localStorage.getItem('p4_review_groups') || '')
-
-  const handleRequestReviewClick = () => {
+  const handleRequestReview = async () => {
     if (!submitDescription.trim()) {
       toast?.showToast({
         type: 'error',
-        title: 'Please enter a description for the review',
+        title: 'Please enter a description',
         duration: 3000
       })
       return
@@ -179,38 +175,11 @@ export function SubmitPanel() {
       return
     }
 
-    setShowReviewModal(true)
-  }
-
-  const confirmRequestReview = async () => {
-    setShowReviewModal(false)
     setIsSubmitting(true)
 
-    // Cache values
-    localStorage.setItem('p4_reviewers', reviewers)
-    localStorage.setItem('p4_review_groups', groups)
-
     try {
-      // Append reviewers to description
-      let finalDescription = submitDescription.trim()
-      
-      const userList = reviewers.split(',').map(u => u.trim()).filter(Boolean)
-      const groupList = groups.split(',').map(g => g.trim()).filter(Boolean)
-      
-      if (userList.length > 0 || groupList.length > 0) {
-        finalDescription += '\n\n#review' // Keyword often helps Swarm trigger
-        
-        if (userList.length > 0) {
-          finalDescription += '\nReviewers: ' + userList.map(u => u.startsWith('@') ? u : `@${u}`).join(' ')
-        }
-        
-        if (groupList.length > 0) {
-          // Swarm uses @@groupname for groups
-          finalDescription += '\nGroups: ' + groupList.map(g => g.startsWith('@@') ? g : (g.startsWith('@') ? `@${g}` : `@@${g}`)).join(' ')
-        }
-      }
+      const finalDescription = submitDescription.trim()
 
-      // Move checked files to this new CL (or identify them if already there)
       const filesToReview = filteredFiles
         .filter(f => checkedFiles.has(f.depotFile))
         .map(f => f.depotFile)
@@ -224,49 +193,39 @@ export function SubmitPanel() {
           throw new Error(createResult.message)
         }
         targetChangelistId = createResult.changelistNumber
-        
         await window.p4.reopenFiles(filesToReview, targetChangelistId)
       } else {
         // If Numbered CL: Move unchecked files away, update description
         const uncheckedFiles = filteredFiles
           .filter(f => !checkedFiles.has(f.depotFile))
           .map(f => f.depotFile)
-          
+
         if (uncheckedFiles.length > 0) {
           await window.p4.reopenFiles(uncheckedFiles, 'default')
         }
-        
         await window.p4.editChangelist(targetChangelistId as number, finalDescription)
       }
 
       // Shelve
       const shelveResult = await window.p4.shelve(targetChangelistId as number)
-      
+
       if (shelveResult.success) {
-        // Revert files after shelving (Standard "Shelve" workflow often implies keeping them open, 
-        // but user specifically requested "Shelve and Revert" behavior to avoid duplication/confusion)
-        // We revert only the files we just shelved.
+        // Revert files after shelving
         await window.p4.revert(filesToReview)
 
-        // Try to get Swarm URL
+        // Open Swarm changelist page in browser
         const swarmUrl = await window.p4.getSwarmUrl()
-        let message = `Shelved files in CL ${targetChangelistId}`
-        
         if (swarmUrl) {
-          // Construct Swarm link
           const cleanSwarmUrl = swarmUrl.replace(/\/$/, '')
-          // Changed from /changes/ to /reviews/ per user request
-          const reviewLink = `${cleanSwarmUrl}/reviews/${targetChangelistId}`
-          message = `Review created: ${reviewLink}`
-          
-          console.log('Swarm Review Link:', reviewLink)
+          const changelistUrl = `${cleanSwarmUrl}/changes/${targetChangelistId}`
+          window.open(changelistUrl, '_blank')
         }
 
         toast?.showToast({
           type: 'success',
-          title: 'Review Requested',
-          message: message,
-          duration: 8000
+          title: 'Shelved',
+          message: `CL ${targetChangelistId} shelved. Request review in Swarm.`,
+          duration: 5000
         })
         setSubmitDescription('')
         await refresh()
@@ -277,7 +236,7 @@ export function SubmitPanel() {
     } catch (err: any) {
       toast?.showToast({
         type: 'error',
-        title: 'Request Review failed',
+        title: 'Shelve failed',
         message: err.message,
         duration: 6000
       })
@@ -287,8 +246,7 @@ export function SubmitPanel() {
   }
 
   return (
-    <>
-      <div className="border-t border-p4-border bg-p4-darker p-3">
+    <div className="border-t border-p4-border bg-p4-darker p-3">
         {/* Description Helper Controls */}
         <div className="flex flex-wrap items-center gap-2 mb-2">
           <div className="flex gap-1">
@@ -335,6 +293,49 @@ export function SubmitPanel() {
           <textarea
             value={submitDescription}
             onChange={(e) => setSubmitDescription(e.target.value)}
+            onKeyDown={async (e) => {
+              if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+                e.preventDefault()
+                
+                if (selectedChangelist === 'default' || selectedChangelist === 0) {
+                  toast?.showToast({
+                    type: 'info',
+                    title: 'Cannot save to Default Changelist',
+                    message: 'Descriptions persist only on numbered changelists. Create a new changelist or request a review to save.',
+                    duration: 5000
+                  })
+                  return
+                }
+
+                if (!submitDescription.trim()) return
+
+                try {
+                  const result = await window.p4.editChangelist(selectedChangelist as number, submitDescription)
+                  if (result.success) {
+                    toast?.showToast({
+                      type: 'success',
+                      title: 'Description Saved',
+                      duration: 2000
+                    })
+                    await refresh()
+                  } else {
+                    toast?.showToast({
+                      type: 'error',
+                      title: 'Save Failed',
+                      message: result.message,
+                      duration: 4000
+                    })
+                  }
+                } catch (err: any) {
+                  toast?.showToast({
+                    type: 'error',
+                    title: 'Error Saving Description',
+                    message: err.message,
+                    duration: 4000
+                  })
+                }
+              }
+            }}
             placeholder="Enter changelist description..."
             className="w-full h-20 bg-p4-dark border border-p4-border rounded p-2 text-sm resize-none focus:outline-none focus:border-p4-blue"
           />
@@ -345,7 +346,7 @@ export function SubmitPanel() {
           </span>
           <div className="flex gap-2 flex-shrink-0">
             <button
-              onClick={handleRequestReviewClick}
+              onClick={handleRequestReview}
               disabled={isSubmitting || checkedCount === 0 || !submitDescription.trim()}
               className="px-3 py-1.5 text-xs font-medium bg-purple-600 hover:bg-purple-500 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
             >
@@ -360,63 +361,6 @@ export function SubmitPanel() {
             </button>
           </div>
         </div>
-      </div>
-
-      {/* Review Modal */}
-      {showReviewModal && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-p4-darker border border-p4-border rounded-lg shadow-xl w-[400px] flex flex-col">
-            <div className="p-4 border-b border-p4-border">
-              <h3 className="text-lg font-medium text-white">Request Review</h3>
-            </div>
-            
-            <div className="p-4 space-y-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-400 mb-1">
-                  Reviewers (Users)
-                </label>
-                <input
-                  type="text"
-                  value={reviewers}
-                  onChange={(e) => setReviewers(e.target.value)}
-                  placeholder="user1, user2"
-                  className="w-full bg-p4-dark border border-p4-border rounded px-3 py-2 text-white focus:outline-none focus:border-p4-blue text-sm"
-                />
-                <p className="text-xs text-gray-500 mt-1">Comma separated list of users</p>
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-400 mb-1">
-                  Reviewers (Groups)
-                </label>
-                <input
-                  type="text"
-                  value={groups}
-                  onChange={(e) => setGroups(e.target.value)}
-                  placeholder="group1, group2"
-                  className="w-full bg-p4-dark border border-p4-border rounded px-3 py-2 text-white focus:outline-none focus:border-p4-blue text-sm"
-                />
-                <p className="text-xs text-gray-500 mt-1">Comma separated list of groups</p>
-              </div>
-            </div>
-
-            <div className="p-4 border-t border-p4-border flex justify-end gap-2 bg-p4-dark">
-              <button
-                onClick={() => setShowReviewModal(false)}
-                className="px-4 py-2 text-sm bg-gray-700 hover:bg-gray-600 rounded text-white transition-colors"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={confirmRequestReview}
-                className="px-4 py-2 text-sm bg-purple-600 hover:bg-purple-500 rounded text-white transition-colors"
-              >
-                Confirm & Request
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-    </>
+    </div>
   )
 }

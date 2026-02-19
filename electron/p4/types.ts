@@ -23,6 +23,8 @@ export interface P4Changelist {
   client: string
   date?: string
   files?: P4File[]
+  reviewId?: number
+  reviewStatus?: string
 }
 
 export interface P4DiffResult {

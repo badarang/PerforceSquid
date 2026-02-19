@@ -24,6 +24,8 @@ interface P4Changelist {
   user: string
   client: string
   date?: string
+  reviewId?: number
+  reviewStatus?: string
 }
 
 interface P4DiffResult {
@@ -42,6 +44,7 @@ interface P4Store {
   selectedChangelist: number | 'default'
   currentDiff: P4DiffResult | null
   isLoading: boolean
+  isDiffLoading: boolean
   error: string | null
   checkedFiles: Set<string>  // depot paths of checked files
   submitDescription: string
@@ -54,6 +57,7 @@ interface P4Store {
   setSelectedChangelist: (cl: number | 'default') => void
   setCurrentDiff: (diff: P4DiffResult | null) => void
   setLoading: (loading: boolean) => void
+  setDiffLoading: (loading: boolean) => void
   setError: (error: string | null) => void
   toggleFileCheck: (depotPath: string) => void
   setAllFilesChecked: (checked: boolean) => void
@@ -66,6 +70,7 @@ interface P4Store {
   fetchFiles: () => Promise<void>
   fetchChangelists: () => Promise<void>
   fetchDiff: (file: P4File) => Promise<void>
+  deleteChangelist: (changelist: number) => Promise<{ success: boolean; message: string }>
   refresh: () => Promise<void>
 }
 
@@ -78,6 +83,7 @@ export const useP4Store = create<P4Store>((set, get) => ({
   selectedChangelist: 'default',
   currentDiff: null,
   isLoading: false,
+  isDiffLoading: false,
   error: null,
   checkedFiles: new Set<string>(),
   submitDescription: '',
@@ -115,6 +121,7 @@ export const useP4Store = create<P4Store>((set, get) => ({
   },
   setCurrentDiff: (diff) => set({ currentDiff: diff }),
   setLoading: (loading) => set({ isLoading: loading }),
+  setDiffLoading: (loading) => set({ isDiffLoading: loading }),
   setError: (error) => set({ error }),
   toggleFileCheck: (depotPath) => set((state) => {
     const newChecked = new Set(state.checkedFiles)
@@ -165,12 +172,32 @@ export const useP4Store = create<P4Store>((set, get) => ({
 
   fetchDiff: async (file) => {
     try {
-      set({ isLoading: true, selectedFile: file })
+      set({ isDiffLoading: true, selectedFile: file })
       const filePath = file.clientFile || file.depotFile
       const diff = await window.p4.getDiff(filePath)
-      set({ currentDiff: diff, isLoading: false, error: null })
+      set({ currentDiff: diff, isDiffLoading: false, error: null })
     } catch (err: any) {
-      set({ currentDiff: null, isLoading: false, error: err.message })
+      set({ currentDiff: null, isDiffLoading: false, error: err.message })
+    }
+  },
+
+  deleteChangelist: async (changelist: number) => {
+    try {
+      set({ isLoading: true })
+      const result = await window.p4.deleteChangelist(changelist)
+      if (result.success) {
+        // Refresh changelists after deletion
+        await get().fetchChangelists()
+        // If deleted changelist was selected, select default
+        if (get().selectedChangelist === changelist) {
+          get().setSelectedChangelist('default')
+        }
+      }
+      set({ isLoading: false })
+      return result
+    } catch (err: any) {
+      set({ isLoading: false, error: err.message })
+      return { success: false, message: err.message }
     }
   },
 

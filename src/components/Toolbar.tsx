@@ -3,6 +3,7 @@ import { useP4Store } from '../stores/p4Store'
 import { useToastContext } from '../App'
 import { Settings } from './Settings'
 import { StreamSelector } from './StreamSelector'
+import { JiraPanel } from './JiraPanel'
 import iconSvg from '../assets/icon.svg'
 
 // Loading overlay component
@@ -29,7 +30,10 @@ export function Toolbar({ currentStream, onStreamChange }: ToolbarProps) {
   const toast = useToastContext()
   const [isSyncing, setIsSyncing] = useState(false)
   const [isReverting, setIsReverting] = useState(false)
+  const [isReconcilingSmart, setIsReconcilingSmart] = useState(false)
+  const [isReconcilingAll, setIsReconcilingAll] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
+  const [showJiraPanel, setShowJiraPanel] = useState(false)
   const [loadingMessage, setLoadingMessage] = useState('')
 
   const handleSync = async () => {
@@ -122,6 +126,49 @@ export function Toolbar({ currentStream, onStreamChange }: ToolbarProps) {
     }
   }
 
+  const handleReconcileSmart = async () => {
+    setIsReconcilingSmart(true)
+    setLoadingMessage('Reconciling code files in Assets/Scripts...')
+    try {
+      const result = await window.p4.reconcileOfflineSmart()
+      await refresh()
+      toast?.showToast({
+        type: result.success ? 'success' : 'error',
+        title: result.success ? 'Reconcile Code finished' : 'Reconcile Code failed',
+        message: result.success
+          ? (result.files.length > 0
+            ? `${result.files.length} file(s) processed`
+            : 'No changed files found in Assets/Scripts')
+          : result.message,
+        duration: result.success ? 4000 : 6000
+      })
+    } finally {
+      setIsReconcilingSmart(false)
+      setLoadingMessage('')
+    }
+  }
+
+  const handleReconcileAll = async () => {
+    const confirmed = confirm('Run Reconcile Offline Work for entire workspace? This can take a long time.')
+    if (!confirmed) return
+
+    setIsReconcilingAll(true)
+    setLoadingMessage('Reconciling entire workspace (this may take time)...')
+    try {
+      const result = await window.p4.reconcileOfflineAll()
+      await refresh()
+      toast?.showToast({
+        type: result.success ? 'success' : 'error',
+        title: result.success ? 'Full Reconcile finished' : 'Full Reconcile failed',
+        message: result.success ? 'Workspace reconcile completed' : result.message,
+        duration: result.success ? 4000 : 7000
+      })
+    } finally {
+      setIsReconcilingAll(false)
+      setLoadingMessage('')
+    }
+  }
+
   return (
     <>
     {loadingMessage && <LoadingOverlay message={loadingMessage} />}
@@ -153,6 +200,24 @@ export function Toolbar({ currentStream, onStreamChange }: ToolbarProps) {
         {isSyncing ? '...' : '↓'} Sync
       </button>
 
+      <button
+        onClick={handleReconcileSmart}
+        disabled={isReconcilingSmart}
+        className="px-3 py-1.5 text-sm bg-gray-700 hover:bg-gray-600 rounded transition-colors disabled:opacity-50"
+        title="Reconcile changed code files under Assets/Scripts only"
+      >
+        {isReconcilingSmart ? '...' : '⚡'} Reconcile Code
+      </button>
+
+      <button
+        onClick={handleReconcileAll}
+        disabled={isReconcilingAll}
+        className="px-3 py-1.5 text-sm bg-gray-700 hover:bg-gray-600 rounded transition-colors disabled:opacity-50"
+        title="Reconcile entire workspace"
+      >
+        {isReconcilingAll ? '...' : '◎'} Reconcile All
+      </button>
+
       {/* Stream Selector */}
       <div className="mx-2 border-l border-p4-border pl-4">
         <StreamSelector
@@ -168,6 +233,14 @@ export function Toolbar({ currentStream, onStreamChange }: ToolbarProps) {
       </div>
 
       <button
+        onClick={() => setShowJiraPanel(true)}
+        className="px-3 py-1.5 text-sm bg-gray-700 hover:bg-gray-600 rounded transition-colors"
+        title="Unified Jira status panel"
+      >
+        Jira
+      </button>
+
+      <button
         onClick={() => setShowSettings(true)}
         className="px-3 py-1.5 text-sm bg-gray-700 hover:bg-gray-600 rounded transition-colors"
         title="Settings"
@@ -176,6 +249,7 @@ export function Toolbar({ currentStream, onStreamChange }: ToolbarProps) {
       </button>
 
       <Settings isOpen={showSettings} onClose={() => setShowSettings(false)} />
+      <JiraPanel isOpen={showJiraPanel} onClose={() => setShowJiraPanel(false)} />
     </div>
     </>
   )

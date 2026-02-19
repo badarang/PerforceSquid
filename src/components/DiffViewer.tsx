@@ -108,7 +108,7 @@ interface DiffViewerProps {
 }
 
 export function DiffViewer({ isStandalone = false, initialMode = 'diff' }: DiffViewerProps) {
-  const { selectedFile, currentDiff, isLoading, fetchDiff } = useP4Store()
+  const { selectedFile, currentDiff, isDiffLoading, fetchDiff } = useP4Store()
   const toast = useToastContext()
   const [viewMode, setViewMode] = useState<'diff' | 'blame'>('diff')
   const [blameData, setBlameData] = useState<BlameLine[]>([])
@@ -254,7 +254,7 @@ export function DiffViewer({ isStandalone = false, initialMode = 'diff' }: DiffV
     )
   }
 
-  if (isLoading || isEditLoading) {
+  if (isDiffLoading || isEditLoading) {
     return (
       <div className="h-full flex items-center justify-center text-gray-500">
         <div className="animate-pulse">Loading...</div>
