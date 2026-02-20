@@ -801,7 +801,7 @@ export function CommitGraph({
   const streamName = currentStreamPath?.split('/').filter(p => p).pop() || 'stream'
 
   return (
-    <div className="h-full flex flex-col bg-p4-dark">
+    <div className="h-full min-w-[360px] flex flex-col bg-p4-dark">
       {/* Header */}
       <div className="p-3 border-b border-p4-border flex-shrink-0">
         <div className="flex items-center justify-between">

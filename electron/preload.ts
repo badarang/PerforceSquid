@@ -14,10 +14,19 @@ const p4Api = {
   sync: (filePath?: string) => ipcRenderer.invoke('p4:sync', filePath),
   reconcileOfflineSmart: () => ipcRenderer.invoke('p4:reconcileOfflineSmart'),
   reconcileOfflineAll: () => ipcRenderer.invoke('p4:reconcileOfflineAll'),
+  onReconcileProgress: (
+    callback: (progress: { mode: 'smart' | 'full'; phase: 'scanning' | 'reconciling' | 'done'; completed: number; total: number; message?: string }) => void
+  ) => {
+    const listener = (_event: unknown, progress: { mode: 'smart' | 'full'; phase: 'scanning' | 'reconciling' | 'done'; completed: number; total: number; message?: string }) => {
+      callback(progress)
+    }
+    ipcRenderer.on('p4:reconcileProgress', listener)
+    return () => ipcRenderer.removeListener('p4:reconcileProgress', listener)
+  },
   revert: (files: string[]) => ipcRenderer.invoke('p4:revert', files),
   revertUnchanged: () => ipcRenderer.invoke('p4:revertUnchanged'),
   shelve: (changelist: number) => ipcRenderer.invoke('p4:shelve', changelist),
-  unshelve: (changelist: number) => ipcRenderer.invoke('p4:unshelve', changelist),
+  unshelve: (changelist: number, files?: string[]) => ipcRenderer.invoke('p4:unshelve', changelist, files),
   getSubmittedChanges: (depotPath: string, maxChanges?: number) =>
     ipcRenderer.invoke('p4:submittedChanges', depotPath, maxChanges),
   describeChangelist: (changelist: number) =>
@@ -26,7 +35,8 @@ const p4Api = {
   switchStream: (streamPath: string) => ipcRenderer.invoke('p4:switchStream', streamPath),
   getCurrentDepot: () => ipcRenderer.invoke('p4:getCurrentDepot'),
   getSwarmUrl: () => ipcRenderer.invoke('p4:getSwarmUrl'),
-  createSwarmReview: (changelist: number, reviewers: string[]) => ipcRenderer.invoke('p4:createSwarmReview', changelist, reviewers),
+  createSwarmReview: (changelist: number, reviewers: string[], description?: string) =>
+    ipcRenderer.invoke('p4:createSwarmReview', changelist, reviewers, description),
   getUsers: () => ipcRenderer.invoke('p4:users'),
   reopenFiles: (files: string[], changelist: number | 'default') =>
     ipcRenderer.invoke('p4:reopenFiles', files, changelist),
@@ -59,6 +69,10 @@ const p4Api = {
 const settingsApi = {
   getAutoLaunch: () => ipcRenderer.invoke('settings:getAutoLaunch'),
   setAutoLaunch: (enabled: boolean) => ipcRenderer.invoke('settings:setAutoLaunch', enabled),
+  getDefaultReviewers: () => ipcRenderer.invoke('settings:getDefaultReviewers'),
+  setDefaultReviewers: (reviewers: string[]) => ipcRenderer.invoke('settings:setDefaultReviewers', reviewers),
+  getReviewLink: (changelist: number) => ipcRenderer.invoke('settings:getReviewLink', changelist),
+  setReviewLink: (changelist: number, reviewUrl: string) => ipcRenderer.invoke('settings:setReviewLink', changelist, reviewUrl),
 }
 
 const dialogApi = {

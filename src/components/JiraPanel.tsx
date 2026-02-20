@@ -57,7 +57,7 @@ export function JiraPanel({ isOpen, onClose }: JiraPanelProps) {
   const [projectKey, setProjectKey] = useState('JJRHB')
   const [limit, setLimit] = useState(5)
   const [ticketValue, setTicketValue] = useState('')
-  const [threshold, setThreshold] = useState(0.3)
+  const [threshold, setThreshold] = useState(0.2)
   const [output, setOutput] = useState('')
   const [isBusy, setIsBusy] = useState(false)
 
@@ -163,7 +163,7 @@ export function JiraPanel({ isOpen, onClose }: JiraPanelProps) {
                 <input
                   value={projectKey}
                   onChange={(e) => setProjectKey(e.target.value)}
-                  placeholder="Project Key"
+                  placeholder="Project or Ticket (e.g. JJRHB / JJRHB-829)"
                   className="flex-1 bg-p4-dark border border-p4-border rounded px-3 py-2 text-sm text-white"
                 />
                 <input
@@ -195,7 +195,7 @@ export function JiraPanel({ isOpen, onClose }: JiraPanelProps) {
                   max={1}
                   step={0.05}
                   value={threshold}
-                  onChange={(e) => setThreshold(Number(e.target.value || 0.3))}
+                  onChange={(e) => setThreshold(Number(e.target.value || 0.2))}
                   className="w-24 bg-p4-dark border border-p4-border rounded px-3 py-2 text-sm text-white"
                 />
               </div>

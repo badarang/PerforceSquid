@@ -1,6 +1,8 @@
 import { exec, spawn } from 'child_process'
 import { promisify } from 'util'
 import { promises as fs } from 'fs'
+import https from 'https'
+import { extname, join } from 'path'
 import type { P4Info, P4File, P4Changelist, P4DiffResult, P4Stream, P4Workspace, P4Depot, StreamRelation, StreamType } from './types'
 
 const execAsync = promisify(exec)
@@ -35,9 +37,24 @@ interface ReconcileResult {
   files: string[]
 }
 
+export interface ReconcileProgress {
+  mode: 'smart' | 'full'
+  phase: 'scanning' | 'reconciling' | 'done'
+  completed: number
+  total: number
+  message?: string
+}
+
 export class P4Service {
   private currentClient: string | null = null
   private cachedInfo: P4Info | null = null
+  private static readonly MAX_RECONCILE_ALL_FILES = 5000
+  private static readonly SMART_CODE_EXTENSIONS = new Set([
+    '.cs', '.js', '.jsx', '.ts', '.tsx', '.py', '.java', '.kt', '.kts',
+    '.cpp', '.c', '.cc', '.cxx', '.h', '.hpp', '.hh', '.hxx',
+    '.m', '.mm', '.swift', '.go', '.rs', '.php', '.rb', '.lua',
+    '.sh', '.ps1', '.bat', '.cmd', '.sql', '.json', '.xml', '.yaml', '.yml'
+  ])
 
   setClient(clientName: string) {
     if (this.currentClient !== clientName) {
@@ -58,7 +75,8 @@ export class P4Service {
 
       return new Promise((resolve, reject) => {
         // Use spawn for all commands to avoid maxBuffer limits
-        const proc = spawn('p4', allArgs, { shell: true })
+        // Run p4 CLI directly (no shell) to avoid accidental GUI command resolution.
+        const proc = spawn('p4', allArgs, { shell: false })
         let stdout = ''
         let stderr = ''
 
@@ -316,14 +334,33 @@ export class P4Service {
     }
   }
 
+  private normalizeFileSpec(fileSpec: string): string {
+    const trimmed = (fileSpec || '').trim()
+    if (
+      (trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+      (trimmed.startsWith("'") && trimmed.endsWith("'"))
+    ) {
+      return trimmed.slice(1, -1)
+    }
+    return trimmed
+  }
+
+  private isLikelyLocalPath(fileSpec: string): boolean {
+    return /^[A-Za-z]:[\\/]/.test(fileSpec) || fileSpec.startsWith('\\\\')
+  }
+
   async getDiff(file: P4File | string): Promise<P4DiffResult> {
-    const depotPath = typeof file === 'string' ? file : file.depotFile
-    const clientPath = typeof file === 'string' ? null : file.clientFile
+    const depotPath = typeof file === 'string'
+      ? this.normalizeFileSpec(file)
+      : this.normalizeFileSpec(file.depotFile)
+    const clientPath = typeof file === 'string'
+      ? (this.isLikelyLocalPath(depotPath) ? depotPath : null)
+      : this.normalizeFileSpec(file.clientFile)
 
     try {
       const [diffOutput, oldContent, newContent] = await Promise.all([
-        this.runCommand(['diff', '-du', `"${depotPath}"`]),
-        this.runCommand(['print', '-q', `"${depotPath}#have"`]).catch(() => ''),
+        this.runCommand(['diff', '-du', depotPath]),
+        this.runCommand(['print', '-q', `${depotPath}#have`]).catch(() => ''),
         (async () => {
           try {
             if (clientPath && clientPath.trim() !== '') {
@@ -334,7 +371,7 @@ export class P4Service {
           } catch (err) {
             console.error('Local file read failed, falling back to P4 print:', err)
           }
-          return await this.runCommand(['print', '-q', `"${depotPath}"`])
+          return await this.runCommand(['print', '-q', depotPath])
         })()
       ])
 
@@ -411,7 +448,7 @@ export class P4Service {
       }
     }
 
-    return trimmed
+    return this.dedupeDuplicateHunks(trimmed)
   }
 
   private splitDiffBlocks(diffText: string): string[] {
@@ -434,6 +471,55 @@ export class P4Service {
     flush()
 
     return blocks
+  }
+
+  private dedupeDuplicateHunks(diffText: string): string {
+    const lines = diffText.split('\n')
+    if (!lines.some(line => line.startsWith('@@'))) {
+      return diffText
+    }
+
+    const output: string[] = []
+    let i = 0
+
+    while (i < lines.length) {
+      // Preserve file separators and process file-by-file where possible.
+      if (lines[i].startsWith('==== ')) {
+        output.push(lines[i])
+        i++
+      }
+
+      // Keep non-hunk preamble lines (e.g. ---/+++ headers).
+      while (i < lines.length && !lines[i].startsWith('@@') && !lines[i].startsWith('==== ')) {
+        output.push(lines[i])
+        i++
+      }
+
+      // De-duplicate identical hunks within this section.
+      const seenHunks = new Set<string>()
+      while (i < lines.length && !lines[i].startsWith('==== ')) {
+        if (!lines[i].startsWith('@@')) {
+          output.push(lines[i])
+          i++
+          continue
+        }
+
+        const hunkLines: string[] = [lines[i]]
+        i++
+        while (i < lines.length && !lines[i].startsWith('@@') && !lines[i].startsWith('==== ')) {
+          hunkLines.push(lines[i])
+          i++
+        }
+
+        const hunkText = hunkLines.join('\n')
+        if (!seenHunks.has(hunkText)) {
+          seenHunks.add(hunkText)
+          output.push(...hunkLines)
+        }
+      }
+    }
+
+    return output.join('\n').trim()
   }
 
   private async enrichWithSwarmReviews(changelists: P4Changelist[]): Promise<P4Changelist[]> {
@@ -572,7 +658,7 @@ export class P4Service {
     try {
       let output: string
       if (changelist === 0) {
-        output = await this.runCommand(['submit', '-d', `"${description}"`])
+        output = await this.runCommand(['submit', '-d', description])
       } else {
         output = await this.runCommand(['submit', '-c', String(changelist)])
       }
@@ -664,7 +750,7 @@ export class P4Service {
     try {
       const args = ['sync']
       if (filePath) {
-        args.push(`"${filePath}"`)
+        args.push(this.normalizeFileSpec(filePath))
       }
       const output = await this.runCommand(args)
       return { success: true, message: output || 'Already up to date' }
@@ -673,33 +759,456 @@ export class P4Service {
     }
   }
 
-  private quotePath(value: string): string {
-    return `"${value.replace(/"/g, '\\"')}"`
+  private parseReconcileOutput(output: string): { files: string[]; errorMessage: string | null } {
+    const normalized = (output || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+    const lines = normalized.split('\n').map(l => l.trim()).filter(Boolean)
+
+    // runCommand can sometimes return stdout even on non-zero exit;
+    // detect obvious Perforce error text here.
+    const errorLine = lines.find(line =>
+      line.includes('Perforce client error:') ||
+      line.includes('Perforce password') ||
+      line.toLowerCase().startsWith('error:')
+    )
+    if (errorLine) {
+      return { files: [], errorMessage: normalized || errorLine }
+    }
+
+    const opened = new Set<string>()
+    for (const line of lines) {
+      if (!line.includes(' - ')) continue
+      if (
+        line.includes(' - opened for ') ||
+        line.includes(' - added as ') ||
+        line.includes(' - deleted as ') ||
+        line.includes(' - moved from ') ||
+        line.includes(' - moved into ')
+      ) {
+        const filePart = line.split(' - ')[0]?.trim()
+        if (filePart) opened.add(filePart)
+      }
+    }
+
+    return { files: Array.from(opened), errorMessage: null }
   }
 
-  async reconcileOfflineSmart(): Promise<ReconcileResult> {
+  private extractReconcileFileFromLine(line: string): string | null {
+    const trimmed = line.trim()
+    if (!trimmed.includes(' - ')) return null
+    if (
+      trimmed.includes(' - opened for ') ||
+      trimmed.includes(' - added as ') ||
+      trimmed.includes(' - deleted as ') ||
+      trimmed.includes(' - moved from ') ||
+      trimmed.includes(' - moved into ')
+    ) {
+      const filePart = trimmed.split(' - ')[0]?.trim()
+      return filePart || null
+    }
+    return null
+  }
+
+  private extractFractionProgress(line: string): { completed: number; total: number } | null {
+    const normalized = line
+      .replace(/\x08/g, '')
+      .replace(/[|\\-]/g, ' ')
+    const matches = Array.from(normalized.matchAll(/(\d+)\s*\/\s*(\d+)/g))
+    if (matches.length === 0) return null
+    const match = matches[matches.length - 1]
+    const completed = parseInt(match[1], 10)
+    const total = parseInt(match[2], 10)
+    if (!Number.isFinite(completed) || !Number.isFinite(total) || total <= 0) return null
+    return { completed, total }
+  }
+
+  private parseP4Error(stdout: string, stderr: string): string | null {
+    const merged = `${stdout || ''}\n${stderr || ''}`
+    const lines = merged.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n').map(l => l.trim()).filter(Boolean)
+    const errorLines = lines.filter(line =>
+      line.includes('Perforce client error:') ||
+      line.includes('Perforce password') ||
+      line.toLowerCase().startsWith('error:')
+    )
+    if (errorLines.length > 0) {
+      return errorLines.join('\n')
+    }
+    return null
+  }
+
+  private filterSmartCodeFiles(files: string[]): string[] {
+    return files.filter((file) => {
+      const normalized = file.toLowerCase()
+      if (normalized.includes('/assets/scripts/') || normalized.includes('\\assets\\scripts\\')) {
+        return true
+      }
+      const extension = extname(normalized)
+      return P4Service.SMART_CODE_EXTENSIONS.has(extension)
+    })
+  }
+
+  private chunkFiles(files: string[], chunkSize: number): string[][] {
+    const chunks: string[][] = []
+    for (let i = 0; i < files.length; i += chunkSize) {
+      chunks.push(files.slice(i, i + chunkSize))
+    }
+    return chunks
+  }
+
+  private async getSmartReconcileSpecs(): Promise<string[]> {
+    const info = await this.getInfo()
+    const clientRoot = info.clientRoot
+    if (!clientRoot) {
+      return ['//.../Assets/Scripts/...']
+    }
+
+    const candidates: string[] = []
+    const direct = join(clientRoot, 'Assets', 'Scripts')
     try {
-      const info = await this.getInfo()
-      const clientRoot = info.clientRoot
-      if (!clientRoot) {
+      await fs.access(direct)
+      candidates.push(direct)
+    } catch {
+      // ignore
+    }
+
+    try {
+      const entries = await fs.readdir(clientRoot, { withFileTypes: true })
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue
+        const subScripts = join(clientRoot, entry.name, 'Assets', 'Scripts')
+        try {
+          await fs.access(subScripts)
+          candidates.push(subScripts)
+        } catch {
+          // ignore
+        }
+      }
+    } catch {
+      // ignore
+    }
+
+    if (candidates.length === 0) {
+      return ['//.../Assets/Scripts/...']
+    }
+
+    const nonClone = candidates.filter((path) => !/[_-]clone[_-]?\d*/i.test(path))
+    const selected = nonClone.length > 0 ? nonClone : candidates
+    return selected.map((path) => `${path}\\...`)
+  }
+
+  private async reconcileSmartFast(onProgress?: (progress: ReconcileProgress) => void): Promise<ReconcileResult> {
+    const mode: 'smart' = 'smart'
+    const fileSpecs = await this.getSmartReconcileSpecs()
+    const clientArgs = this.currentClient ? ['-c', this.currentClient] : []
+    const allArgs = ['-I', ...clientArgs, 'reconcile', '-c', 'default', '-M', '-e', '-a', '-d', ...fileSpecs]
+
+    return await new Promise((resolve) => {
+      const proc = spawn('p4', allArgs, { shell: false })
+      let stdout = ''
+      let stderr = ''
+      let outBuffer = ''
+      let errBuffer = ''
+      const reconciled = new Set<string>()
+      let knownTotal = 0
+
+      const emit = (phase: 'scanning' | 'reconciling' | 'done', message: string) => {
+        const completed = reconciled.size
+        const total = knownTotal > 0 ? knownTotal : completed
+        onProgress?.({ mode, phase, completed, total, message })
+      }
+
+      emit('scanning', 'Scanning changed code files...')
+
+      const processLine = (line: string) => {
+        const fraction = this.extractFractionProgress(line)
+        if (fraction) {
+          knownTotal = Math.max(knownTotal, fraction.total)
+          const phase = /scan|scanning|discover/i.test(line) ? 'scanning' : 'reconciling'
+          onProgress?.({
+            mode,
+            phase,
+            completed: Math.max(fraction.completed, reconciled.size),
+            total: fraction.total,
+            message: line,
+          })
+        }
+
+        const file = this.extractReconcileFileFromLine(line)
+        if (file) {
+          reconciled.add(file)
+          emit('reconciling', `Reconciling ${reconciled.size}${knownTotal > 0 ? `/${knownTotal}` : ''}`)
+        }
+      }
+
+      const heartbeat = setInterval(() => {
+        emit('scanning', `Scanning changed code files... ${reconciled.size} found`)
+      }, 1000)
+
+      proc.stdout.on('data', (data) => {
+        const chunk = data.toString()
+        stdout += chunk
+        outBuffer += chunk
+        const lines = outBuffer.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n')
+        outBuffer = lines.pop() || ''
+        for (const line of lines) {
+          processLine(line)
+        }
+      })
+
+      proc.stderr.on('data', (data) => {
+        const chunk = data.toString()
+        stderr += chunk
+        errBuffer += chunk
+        const lines = errBuffer.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n')
+        errBuffer = lines.pop() || ''
+        for (const line of lines) {
+          processLine(line)
+        }
+      })
+
+      proc.on('close', (code) => {
+        clearInterval(heartbeat)
+        if (outBuffer.trim()) processLine(outBuffer)
+        if (errBuffer.trim()) processLine(errBuffer)
+
+        const parsedError = this.parseP4Error(stdout, stderr)
+        if (parsedError) {
+          resolve({ success: false, message: parsedError, mode, files: [] })
+          return
+        }
+
+        if (code !== 0 && !stdout.trim()) {
+          resolve({
+            success: false,
+            message: (stderr || `Reconcile failed with code ${code}`).trim(),
+            mode,
+            files: []
+          })
+          return
+        }
+
+        const parsed = this.parseReconcileOutput(`${stdout}\n${stderr}`)
+        const files = parsed.files.length > 0 ? parsed.files : Array.from(reconciled)
+        const finalTotal = knownTotal > 0 ? knownTotal : files.length
+        onProgress?.({ mode, phase: 'done', completed: files.length, total: finalTotal, message: 'Reconcile completed.' })
+        resolve({
+          success: true,
+          message: stdout.trim() || `Reconcile completed: ${files.length} files opened.`,
+          mode,
+          files
+        })
+      })
+
+      proc.on('error', (err) => {
+        clearInterval(heartbeat)
+        resolve({ success: false, message: err.message || 'Failed to run p4 reconcile.', mode, files: [] })
+      })
+    })
+  }
+
+  private async previewReconcileCandidates(
+    mode: 'smart' | 'full',
+    fileSpec: string,
+    onProgress?: (progress: ReconcileProgress) => void
+  ): Promise<{ files: string[]; errorMessage: string | null }> {
+    const clientArgs = this.currentClient ? ['-c', this.currentClient] : []
+    const allArgs = ['-I', ...clientArgs, 'reconcile', '-n', '-c', 'default', '-M', '-e', '-a', '-d', fileSpec]
+
+    return await new Promise((resolve) => {
+      const proc = spawn('p4', allArgs, { shell: false })
+      let stdout = ''
+      let stderr = ''
+      let outBuffer = ''
+      let errBuffer = ''
+      const discovered = new Set<string>()
+      let lastFraction: { completed: number; total: number } | null = null
+      const startedAt = Date.now()
+
+      const emitScanning = (message: string) => {
+        const completed = lastFraction?.completed ?? discovered.size
+        const total = lastFraction?.total ?? Math.max(discovered.size, 0)
+        onProgress?.({
+          mode,
+          phase: 'scanning',
+          completed,
+          total,
+          message,
+        })
+      }
+
+      const processLine = (line: string) => {
+        const fraction = this.extractFractionProgress(line)
+        if (fraction) {
+          lastFraction = fraction
+          emitScanning(line)
+        }
+
+        const file = this.extractReconcileFileFromLine(line)
+        if (file) {
+          discovered.add(file)
+          if (!fraction) {
+            emitScanning(`Scanning... ${discovered.size} found`)
+          }
+        }
+      }
+
+      const heartbeat = setInterval(() => {
+        const elapsedSec = Math.floor((Date.now() - startedAt) / 1000)
+        emitScanning(`Scanning changed files... ${elapsedSec}s`)
+      }, 1000)
+
+      proc.stdout.on('data', (data) => {
+        const chunk = data.toString()
+        stdout += chunk
+        outBuffer += chunk
+        const lines = outBuffer.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n')
+        outBuffer = lines.pop() || ''
+        for (const line of lines) {
+          processLine(line)
+        }
+      })
+
+      proc.stderr.on('data', (data) => {
+        const chunk = data.toString()
+        stderr += chunk
+        errBuffer += chunk
+        const lines = errBuffer.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n')
+        errBuffer = lines.pop() || ''
+        for (const line of lines) {
+          processLine(line)
+        }
+      })
+
+      proc.on('close', (code) => {
+        clearInterval(heartbeat)
+
+        if (outBuffer.trim()) processLine(outBuffer)
+        if (errBuffer.trim()) processLine(errBuffer)
+
+        const parsedError = this.parseP4Error(stdout, stderr)
+        if (parsedError) {
+          resolve({ files: [], errorMessage: parsedError })
+          return
+        }
+
+        if (code !== 0 && !stdout.trim()) {
+          resolve({ files: [], errorMessage: (stderr || `Reconcile preview failed with code ${code}`).trim() })
+          return
+        }
+
+        const parsed = this.parseReconcileOutput(`${stdout}\n${stderr}`)
+        if (parsed.errorMessage) {
+          resolve({ files: [], errorMessage: parsed.errorMessage })
+          return
+        }
+
+        const files = parsed.files.length > 0
+          ? parsed.files
+          : Array.from(discovered)
+        resolve({ files, errorMessage: null })
+      })
+
+      proc.on('error', (err) => {
+        clearInterval(heartbeat)
+        resolve({ files: [], errorMessage: err.message || 'Failed to run p4 reconcile preview.' })
+      })
+    })
+  }
+
+  private async reconcileWithProgress(
+    mode: 'smart' | 'full',
+    fileSpec: string,
+    onProgress?: (progress: ReconcileProgress) => void
+  ): Promise<ReconcileResult> {
+    try {
+      if (mode === 'smart') {
+        return this.reconcileSmartFast(onProgress)
+      }
+
+      onProgress?.({ mode, phase: 'scanning', completed: 0, total: 0, message: 'Scanning changed files...' })
+      const previewScope = mode === 'smart' ? '//...' : fileSpec
+      const preview = await this.previewReconcileCandidates(mode, previewScope, onProgress)
+      if (preview.errorMessage) {
+        return { success: false, message: preview.errorMessage, mode, files: [] }
+      }
+
+      const allCandidates = preview.files
+      const targetFiles = mode === 'smart' ? this.filterSmartCodeFiles(allCandidates) : allCandidates
+      const total = targetFiles.length
+      if (total === 0) {
+        onProgress?.({ mode, phase: 'done', completed: 0, total: 0, message: 'No changed files found.' })
         return {
-          success: false,
-          message: 'Client root not found.',
-          mode: 'smart',
+          success: true,
+          message: mode === 'smart' ? 'No changed code files found.' : 'No changed files found in workspace.',
+          mode,
           files: []
         }
       }
 
-      const scriptsRoot = `${clientRoot}\\Assets\\Scripts`
-      const scriptsPattern = `${scriptsRoot}\\...`
-      const args = ['reconcile', '-e', '-a', '-d', this.quotePath(scriptsPattern)]
-      const output = await this.runCommand(args)
+      if (mode === 'full' && total > P4Service.MAX_RECONCILE_ALL_FILES) {
+        onProgress?.({
+          mode,
+          phase: 'done',
+          completed: 0,
+          total,
+          message: `Blocked: ${total} files exceeds safe limit (${P4Service.MAX_RECONCILE_ALL_FILES}).`
+        })
+        return {
+          success: false,
+          message: `Reconcile All blocked for safety: ${total} files detected (limit ${P4Service.MAX_RECONCILE_ALL_FILES}). Use Reconcile Code, or reconcile smaller paths.`,
+          mode,
+          files: []
+        }
+      }
+
+      const reconciled = new Set<string>()
+      const chunks = this.chunkFiles(targetFiles, 25)
+      let processed = 0
+      onProgress?.({ mode, phase: 'reconciling', completed: 0, total, message: `Reconciling 0/${total}` })
+
+      for (const chunk of chunks) {
+        const output = await this.runCommand(['reconcile', '-c', 'default', '-M', '-e', '-a', '-d', ...chunk])
+        const parsed = this.parseReconcileOutput(output)
+        if (parsed.errorMessage) {
+          return { success: false, message: parsed.errorMessage, mode, files: [] }
+        }
+        parsed.files.forEach((file) => reconciled.add(file))
+        processed += chunk.length
+        onProgress?.({
+          mode,
+          phase: 'reconciling',
+          completed: Math.min(processed, total),
+          total,
+          message: `Reconciling ${Math.min(processed, total)}/${total}`
+        })
+      }
+
+      const reconciledFiles = Array.from(reconciled)
+      onProgress?.({
+        mode,
+        phase: 'done',
+        completed: total,
+        total,
+        message: `Reconcile completed (${reconciledFiles.length} opened).`
+      })
       return {
         success: true,
-        message: output || 'Reconciled Assets/Scripts.',
-        mode: 'smart',
-        files: [scriptsPattern]
+        message: `Reconcile completed: ${reconciledFiles.length}/${total} files opened.`,
+        mode,
+        files: reconciledFiles
       }
+    } catch (error: any) {
+      return {
+        success: false,
+        message: error.message || 'Reconcile failed.',
+        mode,
+        files: []
+      }
+    }
+  }
+
+  async reconcileOfflineSmart(onProgress?: (progress: ReconcileProgress) => void): Promise<ReconcileResult> {
+    try {
+      return this.reconcileWithProgress('smart', '//...', onProgress)
     } catch (error: any) {
       return {
         success: false,
@@ -710,32 +1219,17 @@ export class P4Service {
     }
   }
 
-  async reconcileOfflineAll(): Promise<ReconcileResult> {
-    try {
-      const output = await this.runCommand(['reconcile', '-e', '-a', '-d', '//...'])
-      return {
-        success: true,
-        message: output || 'Reconcile completed for entire workspace.',
-        mode: 'full',
-        files: ['//...']
-      }
-    } catch (error: any) {
-      return {
-        success: false,
-        message: error.message || 'Full reconcile failed.',
-        mode: 'full',
-        files: ['//...']
-      }
-    }
+  async reconcileOfflineAll(onProgress?: (progress: ReconcileProgress) => void): Promise<ReconcileResult> {
+    return this.reconcileWithProgress('full', '//...', onProgress)
   }
 
   async revert(files: string[]): Promise<{ success: boolean; message: string }> {
     try {
-      const quotedFiles = files.map(f => `"${f}"`)
+      const normalizedFiles = files.map(f => this.normalizeFileSpec(f))
       const filesToDelete: string[] = []
       
       try {
-        const fstatOutput = await this.runCommand(['fstat', '-T', 'clientFile,action', ...quotedFiles])
+        const fstatOutput = await this.runCommand(['fstat', '-T', 'clientFile,action', ...normalizedFiles])
         const lines = fstatOutput.replace(/\r/g, '').split('\n')
         let currentBlock: { clientFile?: string, action?: string } = {}
         
@@ -761,7 +1255,7 @@ export class P4Service {
         console.warn('fstat failed during revert check:', err)
       }
 
-      const output = await this.runCommand(['revert', ...quotedFiles])
+      const output = await this.runCommand(['revert', ...normalizedFiles])
 
       if (filesToDelete.length > 0) {
         // Parallel deletion attempt
@@ -892,9 +1386,13 @@ export class P4Service {
     }
   }
 
-  async unshelve(changelist: number): Promise<{ success: boolean; message: string }> {
+  async unshelve(changelist: number, files?: string[]): Promise<{ success: boolean; message: string }> {
     try {
-      const output = await this.runCommand(['unshelve', '-s', String(changelist)])
+      const normalizedFiles = Array.isArray(files)
+        ? files.map((f) => this.normalizeFileSpec(f)).filter(Boolean)
+        : []
+      const args = ['unshelve', '-s', String(changelist), ...normalizedFiles]
+      const output = await this.runCommand(args)
       return { success: true, message: output }
     } catch (error: any) {
       return { success: false, message: error.message }
@@ -927,8 +1425,8 @@ export class P4Service {
   async reopenFiles(files: string[], changelist: number | 'default'): Promise<{ success: boolean; message: string }> {
     try {
       const clArg = changelist === 'default' || changelist === 0 ? 'default' : String(changelist)
-      const quotedFiles = files.map(f => `"${f}"`)
-      const output = await this.runCommand(['reopen', '-c', clArg, ...quotedFiles])
+      const normalizedFiles = files.map(f => this.normalizeFileSpec(f))
+      const output = await this.runCommand(['reopen', '-c', clArg, ...normalizedFiles])
       return { success: true, message: output }
     } catch (error: any) {
       return { success: false, message: error.message }
@@ -1182,18 +1680,26 @@ export class P4Service {
 
   async getTicket(): Promise<string | null> {
     try {
-      // Read ticket from 'p4 tickets' - this just reads the ticket file without auth attempts
+      // Never invoke interactive login flows here. Read existing ticket only.
+      if (process.env.P4PASSWD && process.env.P4PASSWD.trim()) {
+        return process.env.P4PASSWD.trim()
+      }
+
       const output = await this.runCommand(['tickets'])
       if (!output.trim()) return null
 
-      // Parse ticket output format: "serverAddress (user) = ticketValue"
-      // Example: "ssl:perforce.example.com:1666 (hoh) = 5A4B3C2D1E0F..."
       const lines = output.trim().split('\n')
       for (const line of lines) {
-        const match = line.match(/=\s*([A-F0-9]+)\s*$/i)
-        if (match) {
-          return match[1]
-        }
+        const trimmed = line.trim()
+        if (!trimmed) continue
+
+        // Format A: "server (user) = ticket"
+        const eqMatch = trimmed.match(/=\s*(\S+)\s*$/)
+        if (eqMatch) return eqMatch[1]
+
+        // Format B: "server (user) ticket"
+        const wsMatch = trimmed.match(/\)\s+(\S+)\s*$/)
+        if (wsMatch) return wsMatch[1]
       }
       return null
     } catch (error) {
@@ -1201,7 +1707,11 @@ export class P4Service {
     }
   }
 
-  async createSwarmReview(changelist: number, reviewers: string[] = []): Promise<{ success: boolean; review?: any; message?: string }> {
+  async createSwarmReview(
+    changelist: number,
+    reviewers: string[] = [],
+    description?: string
+  ): Promise<{ success: boolean; review?: any; reviewUrl?: string; message?: string }> {
     try {
       const swarmUrl = await this.getSwarmUrl()
       if (!swarmUrl) {
@@ -1213,7 +1723,10 @@ export class P4Service {
       const ticket = await this.getTicket()
 
       if (!user || !ticket) {
-        return { success: false, message: 'Authentication failed: User or ticket not found' }
+        return {
+          success: false,
+          message: 'Authentication failed: User or ticket not found.'
+        }
       }
 
       // Format reviewers: Swarm API expects array of strings, or object with 'users' and 'groups'
@@ -1225,9 +1738,13 @@ export class P4Service {
       
       const formData = new URLSearchParams()
       formData.append('change', String(changelist))
-      formData.append('description', 'Review from PerforceSquid') // Optional, Swarm uses CL desc if omitted
-      
-      reviewers.forEach(r => formData.append('reviewers[]', r))
+      const reviewDescription = String(description || '').trim() || `Review request for CL ${changelist}`
+      formData.append('description', reviewDescription)
+
+      const normalizedReviewers = reviewers
+        .map((r) => String(r || '').trim())
+        .filter(Boolean)
+      normalizedReviewers.forEach((r) => formData.append('reviewers[]', r))
 
       // Clean URL
       const cleanUrl = swarmUrl.replace(/\/$/, '')
@@ -1235,26 +1752,89 @@ export class P4Service {
       
       const auth = Buffer.from(`${user}:${ticket}`).toString('base64')
 
+      const requestResult = await this.postSwarmForm(apiUrl, auth, formData.toString())
+      if (!requestResult.ok) {
+        const text = requestResult.text
+        const existingIdMatch = text.match(/review(?:\s+id)?\s*[:#]?\s*(\d+)/i)
+        if (requestResult.status === 409 && existingIdMatch) {
+          const existingId = existingIdMatch[1]
+          const reviewUrl = `${cleanUrl}/reviews/${existingId}`
+          return {
+            success: true,
+            review: { id: Number(existingId) },
+            reviewUrl,
+            message: `Review already exists (#${existingId}).`,
+          }
+        }
+        return { success: false, message: `Swarm API Error: ${requestResult.status} ${text}` }
+      }
+
+      let data: any
+      try {
+        data = JSON.parse(requestResult.text || '{}')
+      } catch {
+        return { success: false, message: `Swarm API returned non-JSON response: ${requestResult.text}` }
+      }
+      // Swarm v9 returns { review: { id: 123, ... } }
+      const reviewId = data?.review?.id
+      const reviewUrl = reviewId ? `${cleanUrl}/reviews/${reviewId}` : undefined
+      return { success: true, review: data.review, reviewUrl }
+    } catch (error: any) {
+      const causeMessage = error?.cause?.message ? ` (${error.cause.message})` : ''
+      return { success: false, message: `${error.message || 'Unknown error'}${causeMessage}` }
+    }
+  }
+
+  private async postSwarmForm(
+    apiUrl: string,
+    auth: string,
+    body: string
+  ): Promise<{ ok: boolean; status: number; text: string }> {
+    try {
       const response = await fetch(apiUrl, {
         method: 'POST',
         headers: {
           'Authorization': `Basic ${auth}`,
           'Content-Type': 'application/x-www-form-urlencoded'
         },
-        body: formData
+        body
       })
-
-      if (!response.ok) {
-        const text = await response.text()
-        return { success: false, message: `Swarm API Error: ${response.status} ${text}` }
+      const text = await response.text()
+      return { ok: response.ok, status: response.status, text }
+    } catch (error: any) {
+      const causeMsg = String(error?.cause?.message || error?.message || '')
+      const isCertError = /unable to verify the first certificate|self signed certificate/i.test(causeMsg)
+      if (!isCertError) {
+        throw error
       }
 
-      const data = await response.json()
-      // Swarm v9 returns { review: { id: 123, ... } }
-      
-      return { success: true, review: data.review }
-    } catch (error: any) {
-      return { success: false, message: error.message }
+      return new Promise((resolve, reject) => {
+        const url = new URL(apiUrl)
+        const req = https.request({
+          protocol: url.protocol,
+          hostname: url.hostname,
+          port: url.port ? Number(url.port) : 443,
+          path: `${url.pathname}${url.search}`,
+          method: 'POST',
+          rejectUnauthorized: false,
+          headers: {
+            'Authorization': `Basic ${auth}`,
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'Content-Length': Buffer.byteLength(body).toString()
+          }
+        }, (res) => {
+          let chunks = ''
+          res.on('data', (chunk) => { chunks += chunk.toString() })
+          res.on('end', () => {
+            const status = res.statusCode ?? 500
+            resolve({ ok: status >= 200 && status < 300, status, text: chunks })
+          })
+        })
+
+        req.on('error', (reqErr) => reject(reqErr))
+        req.write(body)
+        req.end()
+      })
     }
   }
 
@@ -1270,7 +1850,7 @@ export class P4Service {
     message?: string
   }> {
     try {
-      const output = await this.runCommand(['annotate', '-c', '-u', `"${filePath}"`])
+      const output = await this.runCommand(['annotate', '-c', '-u', this.normalizeFileSpec(filePath)])
 
       if (!output.trim()) {
         return { success: true, lines: [] }

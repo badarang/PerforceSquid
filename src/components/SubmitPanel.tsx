@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useP4Store } from '../stores/p4Store'
 import { useToastContext } from '../App'
 
@@ -13,6 +13,11 @@ export function SubmitPanel() {
   } = useP4Store()
   const toast = useToastContext()
   const [isSubmitting, setIsSubmitting] = useState(false)
+  const requestReviewLockRef = useRef(false)
+  const [showReviewerPicker, setShowReviewerPicker] = useState(false)
+  const [availableUsers, setAvailableUsers] = useState<string[]>([])
+  const [selectedReviewers, setSelectedReviewers] = useState<string[]>([])
+  const [reviewerFilter, setReviewerFilter] = useState('')
 
   const filteredFiles = files.filter(file => {
     if (selectedChangelist === 'default') {
@@ -22,6 +27,24 @@ export function SubmitPanel() {
   })
 
   const checkedCount = filteredFiles.filter(f => checkedFiles.has(f.depotFile)).length
+
+  useEffect(() => {
+    const loadReviewerSettings = async () => {
+      try {
+        const [users, defaults] = await Promise.all([
+          window.p4.getUsers(),
+          window.settings.getDefaultReviewers()
+        ])
+        const sortedUsers = [...users].sort((a, b) => a.localeCompare(b))
+        const validDefaults = defaults.filter((name) => sortedUsers.includes(name))
+        setAvailableUsers(sortedUsers)
+        setSelectedReviewers(validDefaults)
+      } catch {
+        setAvailableUsers([])
+      }
+    }
+    loadReviewerSettings()
+  }, [])
 
   const prefixes = [
     { label: 'Feat', value: 'feat: ' },
@@ -77,6 +100,31 @@ export function SubmitPanel() {
     // Open in browser
     window.open(url, '_blank')
   }
+
+  const persistDefaultReviewers = async (nextReviewers: string[]) => {
+    try {
+      await window.settings.setDefaultReviewers(nextReviewers)
+    } catch {
+      // Ignore persistence failures in UI
+    }
+  }
+
+  const toggleReviewer = (name: string) => {
+    const next = selectedReviewers.includes(name)
+      ? selectedReviewers.filter((item) => item !== name)
+      : [...selectedReviewers, name]
+    setSelectedReviewers(next)
+    persistDefaultReviewers(next)
+  }
+
+  const clearReviewers = () => {
+    setSelectedReviewers([])
+    persistDefaultReviewers([])
+  }
+
+  const filteredUsers = availableUsers.filter((name) =>
+    name.toLowerCase().includes(reviewerFilter.toLowerCase())
+  )
 
   const handleSubmit = async () => {
     if (!submitDescription.trim()) {
@@ -157,6 +205,10 @@ export function SubmitPanel() {
   }
 
   const handleRequestReview = async () => {
+    if (requestReviewLockRef.current) {
+      return
+    }
+
     if (!submitDescription.trim()) {
       toast?.showToast({
         type: 'error',
@@ -175,19 +227,45 @@ export function SubmitPanel() {
       return
     }
 
+    if (selectedReviewers.length === 0) {
+      toast?.showToast({
+        type: 'error',
+        title: 'No reviewers selected',
+        message: 'Pick at least one reviewer before requesting review.',
+        duration: 4000
+      })
+      return
+    }
+
+    requestReviewLockRef.current = true
     setIsSubmitting(true)
 
     try {
       const finalDescription = submitDescription.trim()
 
-      const filesToReview = filteredFiles
-        .filter(f => checkedFiles.has(f.depotFile))
-        .map(f => f.depotFile)
+      const selectedEntries = filteredFiles.filter((f) => checkedFiles.has(f.depotFile))
+      const filesToReview = selectedEntries.map((f) => f.depotFile)
+      const selectedShelvedEntries = selectedEntries.filter((f: any) => f.status === 'shelved')
+      const hasOnlyShelvedSelection = selectedEntries.length > 0 && selectedShelvedEntries.length === selectedEntries.length
+      const shelvedChangelists = Array.from(
+        new Set(
+          selectedShelvedEntries
+            .map((f: any) => f.changelist)
+            .filter((cl): cl is number => typeof cl === 'number' && cl > 0)
+        )
+      )
 
       let targetChangelistId = selectedChangelist === 'default' ? 0 : selectedChangelist
+      let usedExistingShelvedCl = false
 
-      // If Default CL: Create new CL and move files
-      if (targetChangelistId === 0) {
+      if (hasOnlyShelvedSelection) {
+        if (shelvedChangelists.length !== 1) {
+          throw new Error('Select shelved files from exactly one numbered changelist.')
+        }
+        targetChangelistId = shelvedChangelists[0]
+        usedExistingShelvedCl = true
+        await window.p4.editChangelist(targetChangelistId as number, finalDescription)
+      } else if (targetChangelistId === 0) {
         const createResult = await window.p4.createChangelist(finalDescription)
         if (!createResult.success) {
           throw new Error(createResult.message)
@@ -206,42 +284,63 @@ export function SubmitPanel() {
         await window.p4.editChangelist(targetChangelistId as number, finalDescription)
       }
 
-      // Shelve
-      const shelveResult = await window.p4.shelve(targetChangelistId as number)
+      if (!usedExistingShelvedCl) {
+        const shelveResult = await window.p4.shelve(targetChangelistId as number)
+        if (!shelveResult.success) {
+          throw new Error(shelveResult.message)
+        }
+      }
 
-      if (shelveResult.success) {
-        // Revert files after shelving
+      let reviewResult: { success: boolean; review?: any; reviewUrl?: string; message?: string } = { success: false, message: 'Review request failed.' }
+      try {
+        reviewResult = await window.p4.createSwarmReview(
+          targetChangelistId as number,
+          selectedReviewers,
+          finalDescription
+        )
+      } catch (reviewErr: any) {
+        reviewResult = { success: false, message: reviewErr?.message || 'Review request failed.' }
+      }
+
+      // Revert only when we shelved from opened workspace files.
+      if (!usedExistingShelvedCl) {
         await window.p4.revert(filesToReview)
+      }
 
-        // Open Swarm changelist page in browser
+      // Open review page when available (fallback: changelist page)
+      if (reviewResult.success && reviewResult.reviewUrl) {
+        await window.settings.setReviewLink(targetChangelistId as number, reviewResult.reviewUrl)
+        window.open(reviewResult.reviewUrl, '_blank')
+      } else {
         const swarmUrl = await window.p4.getSwarmUrl()
         if (swarmUrl) {
           const cleanSwarmUrl = swarmUrl.replace(/\/$/, '')
           const changelistUrl = `${cleanSwarmUrl}/changes/${targetChangelistId}`
           window.open(changelistUrl, '_blank')
         }
-
-        toast?.showToast({
-          type: 'success',
-          title: 'Shelved',
-          message: `CL ${targetChangelistId} shelved. Request review in Swarm.`,
-          duration: 5000
-        })
-        setSubmitDescription('')
-        await refresh()
-      } else {
-        throw new Error(shelveResult.message)
       }
+
+      toast?.showToast({
+        type: reviewResult.success ? 'success' : 'error',
+        title: reviewResult.success ? 'Review Requested' : 'Review Request Failed',
+        message: reviewResult.success
+          ? `CL ${targetChangelistId} review requested${selectedReviewers.length > 0 ? ` (${selectedReviewers.length} reviewer${selectedReviewers.length > 1 ? 's' : ''})` : ''}.`
+          : `CL ${targetChangelistId}${usedExistingShelvedCl ? '' : ' shelved,'} but review request failed: ${reviewResult.message || 'Unknown error'}`,
+        duration: 5000
+      })
+      setSubmitDescription('')
+      await refresh()
 
     } catch (err: any) {
       toast?.showToast({
         type: 'error',
-        title: 'Shelve failed',
+        title: 'Request Review failed',
         message: err.message,
         duration: 6000
       })
     } finally {
       setIsSubmitting(false)
+      requestReviewLockRef.current = false
     }
   }
 
@@ -344,7 +443,58 @@ export function SubmitPanel() {
           <span className="text-xs text-gray-500 whitespace-nowrap">
             {checkedCount} file(s) selected
           </span>
-          <div className="flex gap-2 flex-shrink-0">
+          <div className="flex items-center gap-2 flex-shrink-0">
+            <div className="relative">
+              <button
+                onClick={() => setShowReviewerPicker((prev) => !prev)}
+                className="px-3 py-1.5 text-xs font-medium bg-gray-700 hover:bg-gray-600 rounded transition-colors whitespace-nowrap"
+                title="Pick default reviewers for Request Review"
+              >
+                Reviewers {selectedReviewers.length > 0 ? `(${selectedReviewers.length})` : ''}
+              </button>
+              {showReviewerPicker && (
+                <div className="absolute right-0 bottom-9 w-72 max-h-72 overflow-hidden border border-p4-border rounded bg-p4-darker shadow-lg z-20">
+                  <div className="p-2 border-b border-p4-border">
+                    <input
+                      value={reviewerFilter}
+                      onChange={(e) => setReviewerFilter(e.target.value)}
+                      placeholder="Filter users..."
+                      className="w-full bg-p4-dark border border-p4-border rounded px-2 py-1 text-xs focus:outline-none focus:border-p4-blue"
+                    />
+                  </div>
+                  <div className="max-h-44 overflow-auto p-2 space-y-1">
+                    {filteredUsers.length === 0 ? (
+                      <div className="text-xs text-gray-400">No matching users</div>
+                    ) : (
+                      filteredUsers.map((name) => (
+                        <label key={name} className="flex items-center gap-2 text-xs text-gray-200 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={selectedReviewers.includes(name)}
+                            onChange={() => toggleReviewer(name)}
+                          />
+                          <span className="truncate" title={name}>{name}</span>
+                        </label>
+                      ))
+                    )}
+                  </div>
+                  <div className="p-2 border-t border-p4-border flex justify-between">
+                    <button
+                      onClick={clearReviewers}
+                      className="px-2 py-1 text-xs bg-gray-700 hover:bg-gray-600 rounded"
+                    >
+                      Clear
+                    </button>
+                    <button
+                      onClick={() => setShowReviewerPicker(false)}
+                      className="px-2 py-1 text-xs bg-p4-blue hover:bg-blue-600 rounded"
+                    >
+                      Done
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
             <button
               onClick={handleRequestReview}
               disabled={isSubmitting || checkedCount === 0 || !submitDescription.trim()}

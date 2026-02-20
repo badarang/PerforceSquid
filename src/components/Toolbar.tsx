@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useP4Store } from '../stores/p4Store'
 import { useToastContext } from '../App'
 import { Settings } from './Settings'
@@ -6,15 +6,48 @@ import { StreamSelector } from './StreamSelector'
 import { JiraPanel } from './JiraPanel'
 import iconSvg from '../assets/icon.svg'
 
+interface ReconcileProgressState {
+  mode: 'smart' | 'full'
+  phase: 'scanning' | 'reconciling' | 'done'
+  completed: number
+  total: number
+  message?: string
+}
+
 // Loading overlay component
-function LoadingOverlay({ message }: { message: string }) {
+function LoadingOverlay({ message, reconcileProgress }: { message: string; reconcileProgress?: ReconcileProgressState | null }) {
+  const hasProgress = !!reconcileProgress
+  const completed = reconcileProgress?.completed ?? 0
+  const total = reconcileProgress?.total ?? 0
+  const hasDeterminateProgress = hasProgress && total > 0
+  const percent = hasDeterminateProgress
+    ? Math.max(0, Math.min(100, Math.round((completed / total) * 100)))
+    : 0
+
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
       <div className="bg-p4-darker border border-p4-border rounded-lg p-6 shadow-xl">
-        <div className="flex items-center gap-4">
+        <div className="flex items-center gap-4 mb-3">
           <img src={iconSvg} className="w-8 h-8 animate-spin" alt="Loading..." />
           <div className="text-white">{message}</div>
         </div>
+        {reconcileProgress?.phase === 'scanning' && (
+          <div className="text-xs text-gray-300">{reconcileProgress.message || 'Scanning changed files...'}</div>
+        )}
+        {hasProgress && (
+          <div>
+            <div className="flex justify-between text-xs text-gray-300 mb-1">
+              <span>{reconcileProgress?.mode === 'smart' ? 'Reconcile Code' : 'Reconcile All'}</span>
+              <span>{hasDeterminateProgress ? `${completed}/${total} (${percent}%)` : 'Scanning...'}</span>
+            </div>
+            <div className="w-[360px] max-w-[70vw] h-2 bg-gray-700 rounded overflow-hidden">
+              <div
+                className={hasDeterminateProgress ? 'h-full bg-p4-blue transition-all duration-150' : 'h-full bg-p4-blue/0'}
+                style={{ width: hasDeterminateProgress ? `${percent}%` : '0%' }}
+              />
+            </div>
+          </div>
+        )}
       </div>
     </div>
   )
@@ -35,6 +68,16 @@ export function Toolbar({ currentStream, onStreamChange }: ToolbarProps) {
   const [showSettings, setShowSettings] = useState(false)
   const [showJiraPanel, setShowJiraPanel] = useState(false)
   const [loadingMessage, setLoadingMessage] = useState('')
+  const [reconcileProgress, setReconcileProgress] = useState<ReconcileProgressState | null>(null)
+
+  useEffect(() => {
+    const unsubscribe = window.p4.onReconcileProgress((progress) => {
+      setReconcileProgress(progress)
+    })
+    return () => {
+      unsubscribe()
+    }
+  }, [])
 
   const handleSync = async () => {
     setIsSyncing(true)
@@ -128,7 +171,8 @@ export function Toolbar({ currentStream, onStreamChange }: ToolbarProps) {
 
   const handleReconcileSmart = async () => {
     setIsReconcilingSmart(true)
-    setLoadingMessage('Reconciling code files in Assets/Scripts...')
+    setLoadingMessage('Reconciling code files in workspace...')
+    setReconcileProgress({ mode: 'smart', phase: 'scanning', completed: 0, total: 0, message: 'Scanning changed files...' })
     try {
       const result = await window.p4.reconcileOfflineSmart()
       await refresh()
@@ -138,13 +182,14 @@ export function Toolbar({ currentStream, onStreamChange }: ToolbarProps) {
         message: result.success
           ? (result.files.length > 0
             ? `${result.files.length} file(s) processed`
-            : 'No changed files found in Assets/Scripts')
+            : 'No changed code files found')
           : result.message,
         duration: result.success ? 4000 : 6000
       })
     } finally {
       setIsReconcilingSmart(false)
       setLoadingMessage('')
+      setReconcileProgress(null)
     }
   }
 
@@ -154,29 +199,36 @@ export function Toolbar({ currentStream, onStreamChange }: ToolbarProps) {
 
     setIsReconcilingAll(true)
     setLoadingMessage('Reconciling entire workspace (this may take time)...')
+    setReconcileProgress({ mode: 'full', phase: 'scanning', completed: 0, total: 0, message: 'Scanning changed files...' })
     try {
       const result = await window.p4.reconcileOfflineAll()
       await refresh()
       toast?.showToast({
         type: result.success ? 'success' : 'error',
         title: result.success ? 'Full Reconcile finished' : 'Full Reconcile failed',
-        message: result.success ? 'Workspace reconcile completed' : result.message,
+        message: result.success
+          ? (result.files.length > 0
+            ? `${result.files.length} file(s) processed`
+            : 'No changed files found in workspace')
+          : result.message,
         duration: result.success ? 4000 : 7000
       })
     } finally {
       setIsReconcilingAll(false)
       setLoadingMessage('')
+      setReconcileProgress(null)
     }
   }
 
   return (
     <>
-    {loadingMessage && <LoadingOverlay message={loadingMessage} />}
-    <div className="h-12 bg-p4-darker border-b border-p4-border flex items-center px-4 gap-2">
+    {loadingMessage && <LoadingOverlay message={loadingMessage} reconcileProgress={reconcileProgress} />}
+    <div className="h-12 bg-p4-darker border-b border-p4-border overflow-x-auto overflow-y-hidden">
+    <div className="h-full min-w-max flex flex-nowrap items-center px-4 gap-2">
       <button
         onClick={handleRevertUnchanged}
         disabled={isReverting}
-        className="px-3 py-1.5 text-sm bg-gray-700 hover:bg-gray-600 rounded transition-colors disabled:opacity-50"
+        className="shrink-0 whitespace-nowrap px-3 py-1.5 text-sm bg-gray-700 hover:bg-gray-600 rounded transition-colors disabled:opacity-50"
         title="Revert files with no actual changes (p4 revert -a)"
       >
         {isReverting ? '...' : '↩'} Revert Unchanged
@@ -185,7 +237,7 @@ export function Toolbar({ currentStream, onStreamChange }: ToolbarProps) {
       <button
         onClick={() => refresh()}
         disabled={isLoading}
-        className="px-3 py-1.5 text-sm bg-gray-700 hover:bg-gray-600 rounded transition-colors disabled:opacity-50"
+        className="shrink-0 whitespace-nowrap px-3 py-1.5 text-sm bg-gray-700 hover:bg-gray-600 rounded transition-colors disabled:opacity-50"
         title="Refresh"
       >
         {isLoading ? '...' : '↻'} Refresh
@@ -194,7 +246,7 @@ export function Toolbar({ currentStream, onStreamChange }: ToolbarProps) {
       <button
         onClick={handleSync}
         disabled={isSyncing}
-        className="px-3 py-1.5 text-sm bg-gray-700 hover:bg-gray-600 rounded transition-colors disabled:opacity-50"
+        className="shrink-0 whitespace-nowrap px-3 py-1.5 text-sm bg-gray-700 hover:bg-gray-600 rounded transition-colors disabled:opacity-50"
         title="Sync (Get Latest)"
       >
         {isSyncing ? '...' : '↓'} Sync
@@ -203,8 +255,8 @@ export function Toolbar({ currentStream, onStreamChange }: ToolbarProps) {
       <button
         onClick={handleReconcileSmart}
         disabled={isReconcilingSmart}
-        className="px-3 py-1.5 text-sm bg-gray-700 hover:bg-gray-600 rounded transition-colors disabled:opacity-50"
-        title="Reconcile changed code files under Assets/Scripts only"
+        className="shrink-0 whitespace-nowrap px-3 py-1.5 text-sm bg-gray-700 hover:bg-gray-600 rounded transition-colors disabled:opacity-50"
+        title="Reconcile changed code files in workspace"
       >
         {isReconcilingSmart ? '...' : '⚡'} Reconcile Code
       </button>
@@ -212,14 +264,14 @@ export function Toolbar({ currentStream, onStreamChange }: ToolbarProps) {
       <button
         onClick={handleReconcileAll}
         disabled={isReconcilingAll}
-        className="px-3 py-1.5 text-sm bg-gray-700 hover:bg-gray-600 rounded transition-colors disabled:opacity-50"
+        className="shrink-0 whitespace-nowrap px-3 py-1.5 text-sm bg-gray-700 hover:bg-gray-600 rounded transition-colors disabled:opacity-50"
         title="Reconcile entire workspace"
       >
         {isReconcilingAll ? '...' : '◎'} Reconcile All
       </button>
 
       {/* Stream Selector */}
-      <div className="mx-2 border-l border-p4-border pl-4">
+      <div className="shrink-0 mx-2 border-l border-p4-border pl-4">
         <StreamSelector
           currentStream={currentStream}
           onStreamChange={onStreamChange}
@@ -228,13 +280,13 @@ export function Toolbar({ currentStream, onStreamChange }: ToolbarProps) {
 
       <div className="flex-1" />
 
-      <div className="text-xs text-gray-500 mr-2">
+      <div className="shrink-0 whitespace-nowrap text-xs text-gray-500 mr-2">
         Right-click files to revert
       </div>
 
       <button
         onClick={() => setShowJiraPanel(true)}
-        className="px-3 py-1.5 text-sm bg-gray-700 hover:bg-gray-600 rounded transition-colors"
+        className="shrink-0 whitespace-nowrap px-3 py-1.5 text-sm bg-gray-700 hover:bg-gray-600 rounded transition-colors"
         title="Unified Jira status panel"
       >
         Jira
@@ -242,7 +294,7 @@ export function Toolbar({ currentStream, onStreamChange }: ToolbarProps) {
 
       <button
         onClick={() => setShowSettings(true)}
-        className="px-3 py-1.5 text-sm bg-gray-700 hover:bg-gray-600 rounded transition-colors"
+        className="shrink-0 whitespace-nowrap px-3 py-1.5 text-sm bg-gray-700 hover:bg-gray-600 rounded transition-colors"
         title="Settings"
       >
         ⚙ Settings
@@ -250,6 +302,7 @@ export function Toolbar({ currentStream, onStreamChange }: ToolbarProps) {
 
       <Settings isOpen={showSettings} onClose={() => setShowSettings(false)} />
       <JiraPanel isOpen={showJiraPanel} onClose={() => setShowJiraPanel(false)} />
+    </div>
     </div>
     </>
   )

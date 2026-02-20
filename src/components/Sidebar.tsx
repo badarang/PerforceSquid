@@ -18,7 +18,7 @@ export function Sidebar({ onSelectChangelist }: SidebarProps) {
   } = useP4Store()
   const toast = useToastContext()
   
-  const [contextMenu, setContextMenu] = useState<{ x: number, y: number, clNumber: number } | null>(null)
+  const [contextMenu, setContextMenu] = useState<{ x: number, y: number, clNumber: number, reviewUrl?: string | null } | null>(null)
   const menuRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -60,10 +60,32 @@ export function Sidebar({ onSelectChangelist }: SidebarProps) {
     }
   }
 
-  const handleContextMenu = (e: React.MouseEvent, clNumber: number) => {
+  const handleContextMenu = async (e: React.MouseEvent, clNumber: number) => {
     e.preventDefault()
     e.stopPropagation()
-    setContextMenu({ x: e.clientX, y: e.clientY, clNumber })
+    const x = e.clientX
+    const y = e.clientY
+
+    let reviewUrl: string | null = null
+    const changelist = changelists.find((cl) => cl.number === clNumber)
+    if (changelist?.reviewId) {
+      const swarmUrl = await window.p4.getSwarmUrl()
+      if (swarmUrl) {
+        reviewUrl = `${swarmUrl.replace(/\/$/, '')}/reviews/${changelist.reviewId}`
+      }
+    }
+    if (!reviewUrl && clNumber > 0) {
+      reviewUrl = await window.settings.getReviewLink(clNumber)
+    }
+
+    setContextMenu({ x, y, clNumber, reviewUrl })
+  }
+
+  const handleOpenReview = () => {
+    if (!contextMenu?.reviewUrl) return
+    const target = contextMenu.reviewUrl
+    setContextMenu(null)
+    window.open(target, '_blank')
   }
 
   const handleCopyForLLM = async () => {
@@ -248,6 +270,14 @@ export function Sidebar({ onSelectChangelist }: SidebarProps) {
                           {fileCount}
                         </span>
                       )}
+                      {cl.reviewId && (
+                        <span
+                          className={`text-[10px] px-1.5 py-0.5 rounded ${isSelected ? 'bg-purple-500/30 text-purple-200' : 'bg-purple-800/40 text-purple-300'}`}
+                          title={`Review #${cl.reviewId}${cl.reviewStatus ? ` (${cl.reviewStatus})` : ''}`}
+                        >
+                          R#{cl.reviewId}
+                        </span>
+                      )}
                     </div>
                   </div>
                   <div className="text-xs text-gray-500 line-clamp-3 whitespace-pre-wrap mt-1">
@@ -272,6 +302,14 @@ export function Sidebar({ onSelectChangelist }: SidebarProps) {
           >
             Copy Diff
           </button>
+          {contextMenu.reviewUrl && (
+            <button
+              className="w-full text-left px-4 py-2 text-sm text-gray-300 hover:bg-p4-blue/20 hover:text-p4-blue"
+              onClick={handleOpenReview}
+            >
+              Open Review
+            </button>
+          )}
         </div>
       )}
     </div>

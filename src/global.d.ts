@@ -7,6 +7,13 @@ interface P4Client {
 }
 
 interface P4Api {
+  onReconcileProgress: (callback: (progress: {
+    mode: 'smart' | 'full'
+    phase: 'scanning' | 'reconciling' | 'done'
+    completed: number
+    total: number
+    message?: string
+  }) => void) => (() => void)
   getClients: () => Promise<P4Client[]>
   createClient: (client: {
     name: string
@@ -41,7 +48,7 @@ interface P4Api {
   switchStream: (streamPath: string) => Promise<{ success: boolean; message: string }>
   getCurrentDepot: () => Promise<string | null>
   getSwarmUrl: () => Promise<string | null>
-  createSwarmReview: (changelist: number, reviewers: string[]) => Promise<{ success: boolean; review?: any; message?: string }>
+  createSwarmReview: (changelist: number, reviewers: string[], description?: string) => Promise<{ success: boolean; review?: any; reviewUrl?: string; message?: string }>
   getUsers: () => Promise<string[]>
   reopenFiles: (files: string[], changelist: number | 'default') => Promise<{ success: boolean; message: string }>
   createChangelist: (description: string) => Promise<{ success: boolean; changelistNumber: number; message: string }>
@@ -77,6 +84,10 @@ interface P4Api {
 interface SettingsApi {
   getAutoLaunch: () => Promise<boolean>
   setAutoLaunch: (enabled: boolean) => Promise<{ success: boolean }>
+  getDefaultReviewers: () => Promise<string[]>
+  setDefaultReviewers: (reviewers: string[]) => Promise<{ success: boolean }>
+  getReviewLink: (changelist: number) => Promise<string | null>
+  setReviewLink: (changelist: number, reviewUrl: string) => Promise<{ success: boolean }>
 }
 
 interface DialogApi {

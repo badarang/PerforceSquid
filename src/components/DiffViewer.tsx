@@ -27,8 +27,81 @@ function parseDiff(diffText: string): DiffLine[] {
   const result: DiffLine[] = []
   let oldLineNum = 0
   let newLineNum = 0
+  const pairedMinus = new Set<number>()
+  const pairedPlus = new Set<number>()
 
-  for (const line of lines) {
+  const comparable = (value: string) => value.replace(/\r$/, '').trimEnd()
+  const braceOnly = (value: string) => /^[\s{}]+\s*$/.test(value)
+  const isEquivalentChangeLine = (left: string, right: string) => {
+    const a = comparable(left)
+    const b = comparable(right)
+    if (a === b) return true
+    if (braceOnly(a) && braceOnly(b) && a.trim() === b.trim()) return true
+    return false
+  }
+  const resetBoundary = (line: string) =>
+    line.startsWith('@@') || line.startsWith('====') || line.startsWith('---') || line.startsWith('+++') || line.startsWith('diff ')
+
+  // Pair brace-only add/delete lines within the same hunk even when they are
+  // not adjacent. This removes common trailing-brace false positives.
+  {
+    const pendingBraceMinus = new Map<string, number[]>()
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i]
+      if (resetBoundary(line)) {
+        pendingBraceMinus.clear()
+        continue
+      }
+      if (line.startsWith('-')) {
+        const raw = line.slice(1)
+        const key = comparable(raw).trim()
+        if (braceOnly(raw) && key) {
+          const list = pendingBraceMinus.get(key) || []
+          list.push(i)
+          pendingBraceMinus.set(key, list)
+        }
+        continue
+      }
+      if (line.startsWith('+')) {
+        const raw = line.slice(1)
+        const key = comparable(raw).trim()
+        if (!braceOnly(raw) || !key) continue
+        const list = pendingBraceMinus.get(key)
+        if (list && list.length > 0) {
+          const minusIndex = list.shift()!
+          pairedMinus.add(minusIndex)
+          pairedPlus.add(i)
+          if (list.length === 0) pendingBraceMinus.delete(key)
+        }
+      }
+    }
+  }
+
+  // Pair equal -/+ lines within a nearby change block so unchanged lines
+  // (reordered by diff alignment) are rendered as context instead of noise.
+  for (let i = 0; i < lines.length; i++) {
+    if (!lines[i].startsWith('-') || lines[i].startsWith('---')) continue
+    const minusContent = comparable(lines[i].slice(1))
+    if (!minusContent) continue
+
+    for (let j = i + 1; j < lines.length && j <= i + 12; j++) {
+      const candidate = lines[j]
+      if (candidate.startsWith('@@') || candidate.startsWith('====') || candidate.startsWith('---') || candidate.startsWith('+++') || candidate.startsWith('diff ')) {
+        break
+      }
+      if (!(candidate.startsWith('+') || candidate.startsWith('-'))) {
+        break
+      }
+      if (candidate.startsWith('+') && !pairedPlus.has(j) && isEquivalentChangeLine(lines[i].slice(1), candidate.slice(1))) {
+        pairedMinus.add(i)
+        pairedPlus.add(j)
+        break
+      }
+    }
+  }
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]
     if (line.startsWith('---') || line.startsWith('+++') || line.startsWith('diff ')) {
       continue
     }
@@ -43,10 +116,33 @@ function parseDiff(diffText: string): DiffLine[] {
       continue
     }
 
-    if (line.startsWith('+')) {
-      result.push({ type: 'add', content: line.slice(1), newLineNum: newLineNum++ })
-    } else if (line.startsWith('-')) {
+    if (line.startsWith('-')) {
+      if (pairedMinus.has(i)) {
+        result.push({
+          type: 'context',
+          content: line.slice(1),
+          oldLineNum: oldLineNum++,
+          newLineNum: newLineNum++
+        })
+        continue
+      }
+      if (braceOnly(line.slice(1))) {
+        oldLineNum++
+        continue
+      }
       result.push({ type: 'delete', content: line.slice(1), oldLineNum: oldLineNum++ })
+      continue
+    }
+
+    if (line.startsWith('+')) {
+      if (pairedPlus.has(i)) {
+        continue
+      }
+      if (braceOnly(line.slice(1))) {
+        newLineNum++
+        continue
+      }
+      result.push({ type: 'add', content: line.slice(1), newLineNum: newLineNum++ })
     } else if (line.startsWith(' ') || line === '') {
       result.push({
         type: 'context',

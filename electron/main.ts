@@ -11,6 +11,8 @@ const jiraService = new JiraService()
 
 interface IntegrationSettings {
   jiraBotPath?: string
+  defaultReviewers?: string[]
+  reviewLinks?: Record<string, string>
 }
 
 function getIntegrationSettingsPath(): string {
@@ -37,6 +39,13 @@ function saveIntegrationSettings(settings: IntegrationSettings): void {
   } catch {
     // Ignore persistence errors
   }
+}
+
+function updateIntegrationSettings(partial: Partial<IntegrationSettings>): IntegrationSettings {
+  const existing = loadIntegrationSettings()
+  const next: IntegrationSettings = { ...existing, ...partial }
+  saveIntegrationSettings(next)
+  return next
 }
 
 function createWindow() {
@@ -164,12 +173,16 @@ ipcMain.handle('p4:sync', async (_, filePath?: string) => {
   return p4Service.sync(filePath)
 })
 
-ipcMain.handle('p4:reconcileOfflineSmart', async () => {
-  return p4Service.reconcileOfflineSmart()
+ipcMain.handle('p4:reconcileOfflineSmart', async (event) => {
+  return p4Service.reconcileOfflineSmart((progress) => {
+    event.sender.send('p4:reconcileProgress', progress)
+  })
 })
 
-ipcMain.handle('p4:reconcileOfflineAll', async () => {
-  return p4Service.reconcileOfflineAll()
+ipcMain.handle('p4:reconcileOfflineAll', async (event) => {
+  return p4Service.reconcileOfflineAll((progress) => {
+    event.sender.send('p4:reconcileProgress', progress)
+  })
 })
 
 ipcMain.handle('p4:revert', async (_, files: string[]) => {
@@ -184,8 +197,8 @@ ipcMain.handle('p4:shelve', async (_, changelist: number) => {
   return p4Service.shelve(changelist)
 })
 
-ipcMain.handle('p4:unshelve', async (_, changelist: number) => {
-  return p4Service.unshelve(changelist)
+ipcMain.handle('p4:unshelve', async (_, changelist: number, files?: string[]) => {
+  return p4Service.unshelve(changelist, files)
 })
 
 ipcMain.handle('p4:submittedChanges', async (_, depotPath: string, maxChanges?: number) => {
@@ -212,8 +225,8 @@ ipcMain.handle('p4:getSwarmUrl', async () => {
   return p4Service.getSwarmUrl()
 })
 
-ipcMain.handle('p4:createSwarmReview', async (_, changelist: number, reviewers: string[]) => {
-  return p4Service.createSwarmReview(changelist, reviewers)
+ipcMain.handle('p4:createSwarmReview', async (_, changelist: number, reviewers: string[], description?: string) => {
+  return p4Service.createSwarmReview(changelist, reviewers, description)
 })
 
 ipcMain.handle('p4:users', async () => {
@@ -316,6 +329,34 @@ ipcMain.handle('settings:setAutoLaunch', (_, enabled: boolean) => {
   return { success: true }
 })
 
+ipcMain.handle('settings:getDefaultReviewers', () => {
+  const settings = loadIntegrationSettings()
+  return Array.isArray(settings.defaultReviewers) ? settings.defaultReviewers : []
+})
+
+ipcMain.handle('settings:setDefaultReviewers', (_, reviewers: string[]) => {
+  const normalized = Array.isArray(reviewers)
+    ? reviewers.map((r) => String(r || '').trim()).filter(Boolean)
+    : []
+  updateIntegrationSettings({ defaultReviewers: normalized })
+  return { success: true }
+})
+
+ipcMain.handle('settings:getReviewLink', (_, changelist: number) => {
+  const settings = loadIntegrationSettings()
+  const links = settings.reviewLinks || {}
+  const value = links[String(changelist)]
+  return typeof value === 'string' && value.trim() ? value : null
+})
+
+ipcMain.handle('settings:setReviewLink', (_, changelist: number, reviewUrl: string) => {
+  const settings = loadIntegrationSettings()
+  const links = { ...(settings.reviewLinks || {}) }
+  links[String(changelist)] = String(reviewUrl || '').trim()
+  updateIntegrationSettings({ reviewLinks: links })
+  return { success: true }
+})
+
 // JiraBot IPC Handlers
 ipcMain.handle('jira:getPath', async () => {
   return jiraService.getPath()
@@ -323,7 +364,7 @@ ipcMain.handle('jira:getPath', async () => {
 
 ipcMain.handle('jira:setPath', async (_, targetPath: string) => {
   jiraService.setPath(targetPath)
-  saveIntegrationSettings({ jiraBotPath: targetPath })
+  updateIntegrationSettings({ jiraBotPath: targetPath })
   return { success: true }
 })
 

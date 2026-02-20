@@ -457,51 +457,17 @@ export function FileList() {
       const clNumber = contextMenu.file.changelist === 'default' ? 0 : contextMenu.file.changelist
       if (typeof clNumber !== 'number') return
 
-      // 1. Unshelve (Restore to workspace)
+      // Unshelve only: keep files on shelf (do not delete shelved copies).
       const result = await window.p4.unshelve(clNumber, selectedFiles)
       
       if (result.success) {
-        // 2. Verification: Check if files are actually opened
-        // This addresses "anxiety" by ensuring we don't delete unless we are sure.
-        try {
-          const openedFiles = await window.p4.getOpenedFiles()
-          const allRestored = selectedFiles.every(depotFile => 
-            openedFiles.some(f => f.depotFile === depotFile && f.action !== 'delete' && f.status !== 'shelved')
-          )
-          
-          if (!allRestored) {
-            throw new Error('Verification failed: Not all files were restored to workspace.')
-          }
-
-          // 3. Delete from shelf (Remove from shelf)
-          try {
-            await window.p4.deleteShelve(clNumber, selectedFiles)
-            
-            toast?.showToast({
-              type: 'success',
-              title: 'Unshelve Successful',
-              message: `${selectedFiles.length} file(s) moved to workspace`,
-              duration: 3000
-            })
-            await refresh()
-          } catch (delErr: any) {
-            toast?.showToast({
-              type: 'info',
-              title: 'Unshelved with warning',
-              message: 'Files restored but failed to remove from shelf: ' + delErr.message,
-              duration: 5000
-            })
-            await refresh()
-          }
-        } catch (verifyErr: any) {
-             toast?.showToast({
-              type: 'error',
-              title: 'Unshelve Verification Failed',
-              message: 'Files were NOT removed from shelf for safety. ' + verifyErr.message,
-              duration: 6000
-            })
-            await refresh()
-        }
+        toast?.showToast({
+          type: 'success',
+          title: 'Unshelve Successful',
+          message: `${selectedFiles.length} file(s) restored to workspace (shelf kept)`,
+          duration: 3000
+        })
+        await refresh()
       } else {
         toast?.showToast({
           type: 'error',

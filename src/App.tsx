@@ -185,7 +185,7 @@ function App() {
           </PanelResizeHandle>
 
           {/* Middle Panel: History + Graph */}
-          <Panel defaultSize={25} minSize={15} className="border-r border-p4-border flex-shrink-0">
+          <Panel defaultSize={25} minSize={15} className="border-r border-p4-border flex-shrink-0 overflow-x-auto">
             <CommitGraph
               depotPath={depotPath}
               onSelectChangelist={setSelectedHistoryChangelist}
