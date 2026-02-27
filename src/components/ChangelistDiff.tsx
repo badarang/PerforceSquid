@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo, useRef } from 'react'
 import { getUserStyle } from '../utils/userIcon'
 
 interface BlameLine {
@@ -44,87 +44,13 @@ function parseDiff(diffText: string): DiffLine[] {
   const result: DiffLine[] = []
   let oldLineNum = 0
   let newLineNum = 0
-  const pairedMinus = new Set<number>()
-  const pairedPlus = new Set<number>()
-
-  const comparable = (value: string) => value.replace(/\r$/, '').trimEnd()
-  const braceOnly = (value: string) => /^[\s{}]+\s*$/.test(value)
-  const isEquivalentChangeLine = (left: string, right: string) => {
-    const a = comparable(left)
-    const b = comparable(right)
-    if (a === b) return true
-    if (braceOnly(a) && braceOnly(b) && a.trim() === b.trim()) return true
-    return false
-  }
-  const resetBoundary = (line: string) =>
-    line.startsWith('@@') || line.startsWith('====') || line.startsWith('---') || line.startsWith('+++') || line.startsWith('Differences')
-
-  // Pair brace-only add/delete lines within the same hunk even when not
-  // adjacent, to avoid false add/delete coloring on closing braces.
-  {
-    const pendingBraceMinus = new Map<string, number[]>()
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i]
-      if (resetBoundary(line)) {
-        pendingBraceMinus.clear()
-        continue
-      }
-      if (line.startsWith('-')) {
-        const raw = line.slice(1)
-        const key = comparable(raw).trim()
-        if (braceOnly(raw) && key) {
-          const list = pendingBraceMinus.get(key) || []
-          list.push(i)
-          pendingBraceMinus.set(key, list)
-        }
-        continue
-      }
-      if (line.startsWith('+')) {
-        const raw = line.slice(1)
-        const key = comparable(raw).trim()
-        if (!braceOnly(raw) || !key) continue
-        const list = pendingBraceMinus.get(key)
-        if (list && list.length > 0) {
-          const minusIndex = list.shift()!
-          pairedMinus.add(minusIndex)
-          pairedPlus.add(i)
-          if (list.length === 0) pendingBraceMinus.delete(key)
-        }
-      }
-    }
-  }
-
-  // Pair equal -/+ lines within nearby change blocks so unchanged lines are
-  // shown as context, not add/delete noise.
-  for (let i = 0; i < lines.length; i++) {
-    if (!lines[i].startsWith('-') || lines[i].startsWith('---')) continue
-    const minusContent = comparable(lines[i].slice(1))
-    if (!minusContent) continue
-
-    for (let j = i + 1; j < lines.length && j <= i + 12; j++) {
-      const candidate = lines[j]
-      if (candidate.startsWith('@@') || candidate.startsWith('====') || candidate.startsWith('---') || candidate.startsWith('+++') || candidate.startsWith('Differences')) {
-        break
-      }
-      if (!(candidate.startsWith('+') || candidate.startsWith('-'))) {
-        break
-      }
-      if (candidate.startsWith('+') && !pairedPlus.has(j) && isEquivalentChangeLine(lines[i].slice(1), candidate.slice(1))) {
-        pairedMinus.add(i)
-        pairedPlus.add(j)
-        break
-      }
-    }
-  }
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]
-    // Skip the "Differences ..." header
     if (line.startsWith('Differences')) {
       continue
     }
 
-    // File header: ==== //depot/path/file#rev (text) ====
     if (line.startsWith('====')) {
       result.push({
         type: 'file-header',
@@ -133,7 +59,6 @@ function parseDiff(diffText: string): DiffLine[] {
       continue
     }
 
-    // Hunk header: @@ -1,5 +1,7 @@
     if (line.startsWith('@@')) {
       const match = line.match(/@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/)
       if (match) {
@@ -147,7 +72,6 @@ function parseDiff(diffText: string): DiffLine[] {
       continue
     }
 
-    // Context line (starts with space)
     if (line.startsWith(' ')) {
       result.push({
         type: 'context',
@@ -156,34 +80,14 @@ function parseDiff(diffText: string): DiffLine[] {
         newLineNum: newLineNum++
       })
     }
-    // Deleted line (coalesce exact -/+ pairs into context)
-    else if (line.startsWith('-')) {
-      if (pairedMinus.has(i)) {
-        result.push({
-          type: 'context',
-          content: line.slice(1),
-          oldLineNum: oldLineNum++,
-          newLineNum: newLineNum++
-        })
-      } else if (braceOnly(line.slice(1))) {
-        oldLineNum++
-      } else {
-        result.push({
-          type: 'delete',
-          content: line.slice(1),
-          oldLineNum: oldLineNum++
-        })
-      }
+    else if (line.startsWith('-') && !line.startsWith('---')) {
+      result.push({
+        type: 'delete',
+        content: line.slice(1),
+        oldLineNum: oldLineNum++
+      })
     }
-    // Added line
-    else if (line.startsWith('+')) {
-      if (pairedPlus.has(i)) {
-        continue
-      }
-      if (braceOnly(line.slice(1))) {
-        newLineNum++
-        continue
-      }
+    else if (line.startsWith('+') && !line.startsWith('+++')) {
       result.push({
         type: 'add',
         content: line.slice(1),
@@ -223,11 +127,15 @@ function getUserColors(user: string): { text: string; bg: string } {
 }
 
 export function ChangelistDiff({ changelist }: ChangelistDiffProps) {
+  const AUTO_LOAD_DIFF_FILE_LIMIT = 200
   const [info, setInfo] = useState<P4Changelist | null>(null)
   const [files, setFiles] = useState<ChangelistFile[]>([])
   const [diff, setDiff] = useState<string>('')
   const [loading, setLoading] = useState(false)
+  const [diffLoading, setDiffLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [manualDiffRequired, setManualDiffRequired] = useState(false)
+  const requestIdRef = useRef(0)
 
   // Blame state
   const [selectedFileForBlame, setSelectedFileForBlame] = useState<string | null>(null)
@@ -236,8 +144,10 @@ export function ChangelistDiff({ changelist }: ChangelistDiffProps) {
   const [blameError, setBlameError] = useState<string | null>(null)
 
   useEffect(() => {
+    requestIdRef.current += 1
+    const currentRequestId = requestIdRef.current
     if (changelist) {
-      loadChangelist()
+      loadChangelist(currentRequestId)
       // Reset blame state when changelist changes
       setSelectedFileForBlame(null)
       setBlameData([])
@@ -246,25 +156,63 @@ export function ChangelistDiff({ changelist }: ChangelistDiffProps) {
       setInfo(null)
       setFiles([])
       setDiff('')
+      setManualDiffRequired(false)
+      setDiffLoading(false)
       setSelectedFileForBlame(null)
       setBlameData([])
     }
   }, [changelist])
 
-  const loadChangelist = async () => {
+  const loadChangelist = async (requestId: number) => {
     if (!changelist) return
 
     try {
       setLoading(true)
       setError(null)
-      const result = await window.p4.describeChangelist(changelist)
+      setDiff('')
+      setManualDiffRequired(false)
+      setDiffLoading(false)
+
+      const result = await window.p4.describeChangelist(changelist, { includeDiff: false })
+      if (requestId !== requestIdRef.current) return
       setInfo(result.info)
       setFiles(result.files)
-      setDiff(result.diff)
+
+      if (result.files.length <= AUTO_LOAD_DIFF_FILE_LIMIT) {
+        setDiffLoading(true)
+        const withDiff = await window.p4.describeChangelist(changelist, { includeDiff: true })
+        if (requestId !== requestIdRef.current) return
+        setDiff(withDiff.diff)
+      } else {
+        setManualDiffRequired(true)
+      }
     } catch (err: any) {
+      if (requestId !== requestIdRef.current) return
       setError(err.message)
     } finally {
-      setLoading(false)
+      if (requestId === requestIdRef.current) {
+        setLoading(false)
+        setDiffLoading(false)
+      }
+    }
+  }
+
+  const loadFullDiff = async () => {
+    if (!changelist) return
+    const requestId = requestIdRef.current
+    try {
+      setDiffLoading(true)
+      const result = await window.p4.describeChangelist(changelist, { includeDiff: true })
+      if (requestId !== requestIdRef.current) return
+      setDiff(result.diff)
+      setManualDiffRequired(false)
+    } catch (err: any) {
+      if (requestId !== requestIdRef.current) return
+      setError(err.message)
+    } finally {
+      if (requestId === requestIdRef.current) {
+        setDiffLoading(false)
+      }
     }
   }
 
@@ -296,6 +244,8 @@ export function ChangelistDiff({ changelist }: ChangelistDiffProps) {
     }
   }
 
+  const diffLines = useMemo(() => parseDiff(diff), [diff])
+
   if (!changelist) {
     return (
       <div className="h-full flex items-center justify-center text-gray-500">
@@ -322,7 +272,7 @@ export function ChangelistDiff({ changelist }: ChangelistDiffProps) {
           <div className="text-red-400 mb-2">Error loading changelist</div>
           <div className="text-xs mb-4">{error}</div>
           <button
-            onClick={loadChangelist}
+            onClick={() => loadChangelist(requestIdRef.current)}
             className="px-3 py-1.5 bg-gray-700 hover:bg-gray-600 rounded text-xs"
           >
             Retry
@@ -332,7 +282,6 @@ export function ChangelistDiff({ changelist }: ChangelistDiffProps) {
     )
   }
 
-  const diffLines = parseDiff(diff)
   const userStyle = info ? getUserStyle(info.user) : null
 
   return (
@@ -519,7 +468,24 @@ export function ChangelistDiff({ changelist }: ChangelistDiffProps) {
           )
         ) : (
           // Diff View
-          diffLines.length === 0 ? (
+          manualDiffRequired ? (
+            <div className="p-4 text-center text-gray-400">
+              <div className="mb-3">
+                Large changelist detected ({files.length} files). Diff is deferred to keep UI responsive.
+              </div>
+              <button
+                onClick={loadFullDiff}
+                className="px-3 py-1.5 bg-p4-blue hover:bg-blue-600 rounded text-xs text-white"
+                disabled={diffLoading}
+              >
+                {diffLoading ? 'Loading full diff...' : 'Load Full Diff'}
+              </button>
+            </div>
+          ) : diffLoading ? (
+            <div className="p-4 text-center text-gray-500 animate-pulse">
+              Loading diff...
+            </div>
+          ) : diffLines.length === 0 ? (
             <div className="p-4 text-center text-gray-500">
               No diff available (binary file or no changes)
             </div>

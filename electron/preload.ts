@@ -29,8 +29,8 @@ const p4Api = {
   unshelve: (changelist: number, files?: string[]) => ipcRenderer.invoke('p4:unshelve', changelist, files),
   getSubmittedChanges: (depotPath: string, maxChanges?: number) =>
     ipcRenderer.invoke('p4:submittedChanges', depotPath, maxChanges),
-  describeChangelist: (changelist: number) =>
-    ipcRenderer.invoke('p4:describeChangelist', changelist),
+  describeChangelist: (changelist: number, options?: { includeDiff?: boolean }) =>
+    ipcRenderer.invoke('p4:describeChangelist', changelist, options),
   getClientStream: () => ipcRenderer.invoke('p4:getClientStream'),
   switchStream: (streamPath: string) => ipcRenderer.invoke('p4:switchStream', streamPath),
   getCurrentDepot: () => ipcRenderer.invoke('p4:getCurrentDepot'),
@@ -84,6 +84,7 @@ const jiraApi = {
   setPath: (targetPath: string) => ipcRenderer.invoke('jira:setPath', targetPath),
   getStatus: () => ipcRenderer.invoke('jira:getStatus'),
   recommend: (project: string, limit?: number) => ipcRenderer.invoke('jira:recommend', project, limit),
+  track: (project: string, assignee: string, limit?: number) => ipcRenderer.invoke('jira:track', project, assignee, limit),
   similar: (ticketOrUrl: string, threshold?: number) => ipcRenderer.invoke('jira:similar', ticketOrUrl, threshold),
   openInChrome: (targetUrl: string) => ipcRenderer.invoke('jira:openInChrome', targetUrl),
 }

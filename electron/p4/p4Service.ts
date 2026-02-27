@@ -260,7 +260,11 @@ export class P4Service {
         if (currentFile.depotFile) {
           const file = this.mapZtagToFile(currentFile)
           file.status = status
-          if (!fileMap.has(file.depotFile)) {
+          // Prefer opened entries over shelved entries when the same depot file
+          // exists in both states. This keeps Reconcile/Open results visible in
+          // Default changelist instead of being masked by an older shelved copy.
+          const existing = fileMap.get(file.depotFile)
+          if (!existing || (existing.status === 'shelved' && status === 'open')) {
             fileMap.set(file.depotFile, file)
           }
         }
@@ -776,36 +780,72 @@ export class P4Service {
 
     const opened = new Set<string>()
     for (const line of lines) {
-      if (!line.includes(' - ')) continue
-      if (
-        line.includes(' - opened for ') ||
-        line.includes(' - added as ') ||
-        line.includes(' - deleted as ') ||
-        line.includes(' - moved from ') ||
-        line.includes(' - moved into ')
-      ) {
-        const filePart = line.split(' - ')[0]?.trim()
-        if (filePart) opened.add(filePart)
-      }
+      const file = this.extractReconcileFileFromLine(line)
+      if (file) opened.add(file)
     }
 
     return { files: Array.from(opened), errorMessage: null }
   }
 
+  private normalizeReconcileFileSpec(fileSpec: string): string {
+    const noPrefix = (fileSpec || '').trim().replace(/^\.\.\.\s+/, '')
+    const noRevision = noPrefix.replace(/#\S+$/, '')
+    return this.normalizeFileSpec(noRevision)
+  }
+
+  private isReconcileActionLine(rest: string): boolean {
+    const lower = rest.toLowerCase()
+    return (
+      lower.includes('opened for') ||
+      lower.includes('added as') ||
+      lower.includes('deleted as') ||
+      lower.includes('moved from') ||
+      lower.includes('moved into') ||
+      lower.includes('add from') ||
+      lower.includes('edit from') ||
+      lower.includes('delete from')
+    )
+  }
+
   private extractReconcileFileFromLine(line: string): string | null {
     const trimmed = line.trim()
     if (!trimmed.includes(' - ')) return null
-    if (
-      trimmed.includes(' - opened for ') ||
-      trimmed.includes(' - added as ') ||
-      trimmed.includes(' - deleted as ') ||
-      trimmed.includes(' - moved from ') ||
-      trimmed.includes(' - moved into ')
-    ) {
-      const filePart = trimmed.split(' - ')[0]?.trim()
-      return filePart || null
+    const separatorIndex = trimmed.indexOf(' - ')
+    if (separatorIndex < 0) return null
+    const filePart = trimmed.slice(0, separatorIndex).trim()
+    const rest = trimmed.slice(separatorIndex + 3).trim()
+    if (!this.isReconcileActionLine(rest)) return null
+    const normalized = this.normalizeReconcileFileSpec(filePart)
+    return normalized || null
+  }
+
+  private dedupeNormalizedFiles(files: string[]): string[] {
+    const unique = new Set<string>()
+    for (const file of files) {
+      const normalized = this.normalizeReconcileFileSpec(file)
+      if (normalized) unique.add(normalized)
     }
-    return null
+    return Array.from(unique)
+  }
+
+  private isLikelyCodePath(normalizedPath: string): boolean {
+    if (
+      normalizedPath.includes('/assets/scripts/') ||
+      normalizedPath.includes('\\assets\\scripts\\')
+    ) {
+      return true
+    }
+    const extension = extname(normalizedPath)
+    return P4Service.SMART_CODE_EXTENSIONS.has(extension)
+  }
+
+  private filterSmartCodeFiles(files: string[]): string[] {
+    const normalizedFiles = this.dedupeNormalizedFiles(files)
+    const filtered = normalizedFiles.filter((file) => {
+      const normalized = file.toLowerCase()
+      return this.isLikelyCodePath(normalized)
+    })
+    return this.dedupeNormalizedFiles(filtered)
   }
 
   private extractFractionProgress(line: string): { completed: number; total: number } | null {
@@ -833,17 +873,6 @@ export class P4Service {
       return errorLines.join('\n')
     }
     return null
-  }
-
-  private filterSmartCodeFiles(files: string[]): string[] {
-    return files.filter((file) => {
-      const normalized = file.toLowerCase()
-      if (normalized.includes('/assets/scripts/') || normalized.includes('\\assets\\scripts\\')) {
-        return true
-      }
-      const extension = extname(normalized)
-      return P4Service.SMART_CODE_EXTENSIONS.has(extension)
-    })
   }
 
   private chunkFiles(files: string[], chunkSize: number): string[][] {
@@ -1125,13 +1154,13 @@ export class P4Service {
       }
 
       onProgress?.({ mode, phase: 'scanning', completed: 0, total: 0, message: 'Scanning changed files...' })
-      const previewScope = mode === 'smart' ? '//...' : fileSpec
+      const previewScope = fileSpec
       const preview = await this.previewReconcileCandidates(mode, previewScope, onProgress)
       if (preview.errorMessage) {
         return { success: false, message: preview.errorMessage, mode, files: [] }
       }
 
-      const allCandidates = preview.files
+      const allCandidates = this.dedupeNormalizedFiles(preview.files)
       const targetFiles = mode === 'smart' ? this.filterSmartCodeFiles(allCandidates) : allCandidates
       const total = targetFiles.length
       if (total === 0) {
@@ -1471,11 +1500,15 @@ export class P4Service {
     }
   }
 
-  async describeChangelist(changelist: number): Promise<{
+  async describeChangelist(
+    changelist: number,
+    options?: { includeDiff?: boolean }
+  ): Promise<{
     info: P4Changelist | null
     files: Array<{ depotFile: string; action: string; revision: number }>
     diff: string
   }> {
+    const includeDiff = options?.includeDiff !== false
     const parseDescribeOutput = (output: string) => {
       if (!output.trim()) return { info: null, files: [], diff: '' }
 
@@ -1549,9 +1582,16 @@ export class P4Service {
     }
 
     try {
+      const stdArgs = includeDiff
+        ? ['describe', '-du', String(changelist)]
+        : ['describe', '-s', String(changelist)]
+      const shelvedArgs = includeDiff
+        ? ['describe', '-S', '-du', String(changelist)]
+        : ['describe', '-S', '-s', String(changelist)]
+
       const [stdOutput, shelvedOutput] = await Promise.all([
-        this.runCommand(['describe', '-du', String(changelist)]).catch(() => ''),
-        this.runCommand(['describe', '-S', '-du', String(changelist)]).catch(() => '')
+        this.runCommand(stdArgs).catch(() => ''),
+        this.runCommand(shelvedArgs).catch(() => '')
       ])
 
       const stdResult = parseDescribeOutput(stdOutput)
@@ -1574,55 +1614,62 @@ export class P4Service {
         }
       }
 
-      const filesWithDiff = new Set<string>()
-      const diffFileRegex = /==== (.+?)#\d+/g
-      let match
-      while ((match = diffFileRegex.exec(diff)) !== null) {
-        filesWithDiff.add(match[1])
-      }
+      if (includeDiff) {
+        const filesWithDiff = new Set<string>()
+        const diffFileRegex = /==== (.+?)#\d+/g
+        let match
+        while ((match = diffFileRegex.exec(diff)) !== null) {
+          filesWithDiff.add(match[1])
+        }
 
-      const missingDiffFiles = files.filter(f =>
-        !filesWithDiff.has(f.depotFile) &&
-        f.action !== 'delete' &&
-        f.action !== 'branch' &&
-        f.action !== 'integrate' &&
-        f.action !== 'move/delete'
-      )
+        const missingDiffFiles = files.filter(f =>
+          !filesWithDiff.has(f.depotFile) &&
+          f.action !== 'delete' &&
+          f.action !== 'branch' &&
+          f.action !== 'integrate' &&
+          f.action !== 'move/delete'
+        )
 
-      if (missingDiffFiles.length > 0) {
-        const additionalDiffs = await pMap(missingDiffFiles, async (file) => {
-          try {
-            if (file.action === 'add') {
-              const content = await this.runCommand(['print', '-q', `${file.depotFile}#${file.revision}`])
-              if (content.trim()) {
-                const lines = content.replace(/\r\n/g, '\n').split('\n')
-                const diffContent = lines.map(line => `+${line}`).join('\n')
-                return `\n==== ${file.depotFile}#${file.revision} (${file.action}) ====\n@@ -0,0 +1,${lines.length} @@\n${diffContent}`
+        if (missingDiffFiles.length > 0) {
+          const additionalDiffs = await pMap(missingDiffFiles, async (file) => {
+            try {
+              if (file.action === 'add') {
+                const content = await this.runCommand(['print', '-q', `${file.depotFile}#${file.revision}`])
+                if (content.trim()) {
+                  const lines = content.replace(/\r\n/g, '\n').split('\n')
+                  const diffContent = lines.map(line => `+${line}`).join('\n')
+                  return `\n==== ${file.depotFile}#${file.revision} (${file.action}) ====\n@@ -0,0 +1,${lines.length} @@\n${diffContent}`
+                }
+              } else if (file.revision > 1) {
+                const diff2Output = await this.runCommand([
+                  'diff2', '-du',
+                  `${file.depotFile}#${file.revision - 1}`,
+                  `${file.depotFile}#${file.revision}`
+                ])
+                if (diff2Output.trim()) {
+                  return `\n==== ${file.depotFile}#${file.revision} (${file.action}) ====\n${diff2Output.replace(/\r\n/g, '\n')}`
+                }
               }
-            } else if (file.revision > 1) {
-              const diff2Output = await this.runCommand([
-                'diff2', '-du',
-                `${file.depotFile}#${file.revision - 1}`,
-                `${file.depotFile}#${file.revision}`
-              ])
-              if (diff2Output.trim()) {
-                return `\n==== ${file.depotFile}#${file.revision} (${file.action}) ====\n${diff2Output.replace(/\r\n/g, '\n')}`
-              }
+            } catch (err) {
+              return null
             }
-          } catch (err) {
             return null
-          }
-          return null
-        }, 5)
+          }, 5)
 
-        const validDiffs = additionalDiffs.filter((d): d is string => d !== null)
-        if (validDiffs.length > 0) {
-          if (!diff) diff = 'Differences ...\n'
-          diff += validDiffs.join('\n')
+          const validDiffs = additionalDiffs.filter((d): d is string => d !== null)
+          if (validDiffs.length > 0) {
+            if (!diff) diff = 'Differences ...\n'
+            diff += validDiffs.join('\n')
+          }
         }
       }
 
-      const normalizedDiff = this.normalizeDiffOutput(diff)
+      // Keep describe diff as raw as possible to avoid altering hunk order/content.
+      // Some repositories produce repeated or brace-heavy hunks where aggressive
+      // dedupe can make control-flow changes look incorrect in UI.
+      const normalizedDiff = includeDiff
+        ? diff.replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim()
+        : ''
       return { info, files, diff: normalizedDiff }
     } catch (error) {
       return { info: null, files: [], diff: '' }

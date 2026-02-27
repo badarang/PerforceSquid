@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import { createPortal } from 'react-dom'
 
 interface SettingsProps {
   isOpen: boolean
@@ -128,8 +129,8 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
 
   if (!isOpen) return null
 
-  return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+  const modal = (
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
       <div className="bg-p4-darker border border-p4-border rounded-lg w-[500px] shadow-xl max-h-[80vh] flex flex-col">
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-p4-border">
@@ -246,4 +247,6 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
       </div>
     </div>
   )
+
+  return createPortal(modal, document.body)
 }

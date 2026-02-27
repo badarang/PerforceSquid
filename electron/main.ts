@@ -205,9 +205,12 @@ ipcMain.handle('p4:submittedChanges', async (_, depotPath: string, maxChanges?: 
   return p4Service.getSubmittedChanges(depotPath, maxChanges)
 })
 
-ipcMain.handle('p4:describeChangelist', async (_, changelist: number) => {
-  return p4Service.describeChangelist(changelist)
-})
+ipcMain.handle(
+  'p4:describeChangelist',
+  async (_, changelist: number, options?: { includeDiff?: boolean }) => {
+    return p4Service.describeChangelist(changelist, options)
+  }
+)
 
 ipcMain.handle('p4:getClientStream', async () => {
   return p4Service.getClientStream()
@@ -378,6 +381,10 @@ ipcMain.handle('jira:recommend', async (_, project: string, limit: number = 10) 
 
 ipcMain.handle('jira:similar', async (_, ticketOrUrl: string, threshold: number = 0.3) => {
   return jiraService.similar(ticketOrUrl, threshold)
+})
+
+ipcMain.handle('jira:track', async (_, project: string, assignee: string, limit: number = 20) => {
+  return jiraService.track(project, assignee, limit)
 })
 
 ipcMain.handle('jira:openInChrome', async (_, targetUrl: string) => {

@@ -39,7 +39,7 @@ interface P4Api {
   unshelve: (changelist: number, files?: string[]) => Promise<{ success: boolean; message: string }>
   deleteShelve: (changelist: number, files?: string[]) => Promise<{ success: boolean; message: string }>
   getSubmittedChanges: (depotPath: string, maxChanges?: number) => Promise<P4Changelist[]>
-  describeChangelist: (changelist: number) => Promise<{
+  describeChangelist: (changelist: number, options?: { includeDiff?: boolean }) => Promise<{
     info: P4Changelist | null
     files: Array<{ depotFile: string; action: string; revision: number }>
     diff: string
@@ -114,6 +114,7 @@ interface JiraApi {
   setPath: (targetPath: string) => Promise<{ success: boolean }>
   getStatus: () => Promise<JiraStatus>
   recommend: (project: string, limit?: number) => Promise<JiraCommandResult>
+  track: (project: string, assignee: string, limit?: number) => Promise<JiraCommandResult>
   similar: (ticketOrUrl: string, threshold?: number) => Promise<JiraCommandResult>
   openInChrome: (targetUrl: string) => Promise<{ success: boolean; fallback?: boolean }>
 }
