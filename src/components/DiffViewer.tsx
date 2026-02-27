@@ -398,9 +398,9 @@ export function DiffViewer({ isStandalone = false, initialMode = 'diff' }: DiffV
             )
           }
 
-          const lineClass = line.type === 'add' ? 'bg-[#1e2a25] text-[#4bb77e]' :
-                            line.type === 'delete' ? 'bg-[#2a1e1e] text-[#ef5350]' :
-                            'text-gray-300'
+          const lineClass = line.type === 'add' ? 'ghdiff-add' :
+                            line.type === 'delete' ? 'ghdiff-delete' :
+                            'ghdiff-context'
 
           // Blame Info lookup
           let blameInfo = null
@@ -445,22 +445,22 @@ export function DiffViewer({ isStandalone = false, initialMode = 'diff' }: DiffV
           }
 
           return (
-            <div key={index} className={`flex hover:brightness-110 ${lineClass}`}>
+            <div key={index} className={`diff-line ${lineClass}`}>
               {/* Blame Gutter */}
               {viewMode === 'blame' && blameInfo}
               
               {/* Line Numbers */}
-              <div className="flex select-none text-gray-600 text-[11px] font-mono leading-[20px]">
-                 <div className="w-[40px] text-right pr-2 border-r border-gray-800 opacity-60">
+              <div className="flex select-none text-[11px] font-mono leading-[20px]">
+                 <div className="gh-num old">
                    {line.type === 'add' ? '' : line.oldLineNum || ''}
                  </div>
-                 <div className="w-[40px] text-right pr-2 border-r border-gray-700 opacity-60">
+                 <div className="gh-num new">
                    {line.type === 'delete' ? '' : line.newLineNum || ''}
                  </div>
               </div>
 
               {/* Content */}
-              <div className="flex-1 px-4 leading-[20px] whitespace-pre overflow-hidden">
+              <div className="diff-line-content leading-[20px] whitespace-pre overflow-hidden">
                 <span className="inline-block w-[10px] opacity-50 select-none">
                   {line.type === 'add' ? '+' : line.type === 'delete' ? '-' : ' '}
                 </span>

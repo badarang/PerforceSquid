@@ -86,6 +86,19 @@ export class JiraService {
     return this.tryRun(['main.py', '/recommend', '--project', project, '--limit', String(limit)])
   }
 
+  async track(project: string, assignee: string, limit = 20): Promise<JiraCommandResult> {
+    return this.tryRun([
+      'main.py',
+      '/track',
+      '--project',
+      project,
+      '--assignee',
+      assignee,
+      '--limit',
+      String(limit),
+    ])
+  }
+
   async similar(ticketOrUrl: string, threshold = 0.3): Promise<JiraCommandResult> {
     return this.tryRun(['main.py', '/similar', ticketOrUrl, '--threshold', String(threshold)])
   }

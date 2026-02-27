@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useP4Store } from '../stores/p4Store'
 import { useToastContext } from '../App'
 
@@ -48,6 +48,7 @@ export function FileList() {
   // Grouping state
   const [isShelvedExpanded, setShelvedExpanded] = useState(true)
   const [lastClickedSource, setLastClickedSource] = useState<'shelved' | 'opened' | null>(null)
+  const [hasCachedReviewLink, setHasCachedReviewLink] = useState(false)
 
   const filteredFiles = files.filter(file => {
     if (selectedChangelist === 'default') {
@@ -66,7 +67,32 @@ export function FileList() {
   const currentChangelistObj = changelists.find(c => 
     (selectedChangelist === 'default' && c.number === 0) || c.number === selectedChangelist
   )
-  const isReviewRequested = currentChangelistObj?.description.includes('#review') || (!!currentChangelistObj?.reviewId)
+  useEffect(() => {
+    let disposed = false
+    const loadCachedReviewLink = async () => {
+      const clNumber = selectedChangelist === 'default' ? 0 : selectedChangelist
+      if (typeof clNumber !== 'number' || clNumber <= 0) {
+        setHasCachedReviewLink(false)
+        return
+      }
+      try {
+        const url = await window.settings.getReviewLink(clNumber)
+        if (!disposed) setHasCachedReviewLink(!!url)
+      } catch {
+        if (!disposed) setHasCachedReviewLink(false)
+      }
+    }
+    loadCachedReviewLink()
+    return () => {
+      disposed = true
+    }
+  }, [selectedChangelist, changelists.length])
+
+  const isReviewRequested =
+    !!currentChangelistObj?.reviewId ||
+    !!currentChangelistObj?.reviewStatus ||
+    !!currentChangelistObj?.description?.includes('#review') ||
+    hasCachedReviewLink
 
   const getFileName = (path: string) => {
     // Strip trailing separators and split
@@ -108,6 +134,8 @@ export function FileList() {
       // Single click
       setLastClickedIndex(index)
       setLastClickedSource(source)
+      // Single-click selects only this file.
+      setCheckedList([file.depotFile])
       fetchDiff(file)
     }
   }
@@ -230,7 +258,7 @@ export function FileList() {
     }
   }
 
-  const handleMoveToJunk = async () => {
+  const handleMoveToNewChangelist = async () => {
     if (!contextMenu) return
 
     const file = contextMenu.file
@@ -244,25 +272,23 @@ export function FileList() {
     setShowMoveToMenu(false)
 
     try {
-      // Get or create junk changelist
-      const junkResult = await window.p4.getOrCreateJunkChangelist()
-      if (!junkResult.success) {
+      const createResult = await window.p4.createChangelist('New changelist')
+      if (!createResult.success) {
         toast?.showToast({
           type: 'error',
-          title: 'Failed to create Junk changelist',
-          message: junkResult.message,
+          title: 'Failed to create changelist',
+          message: createResult.message,
           duration: 5000
         })
         return
       }
 
-      // Move files to junk changelist
-      const moveResult = await window.p4.reopenFiles(filesToMove, junkResult.changelistNumber)
+      const moveResult = await window.p4.reopenFiles(filesToMove, createResult.changelistNumber)
       if (moveResult.success) {
         toast?.showToast({
           type: 'success',
-          title: 'Moved to Junk',
-          message: `${filesToMove.length} file(s) → CL #${junkResult.changelistNumber}`,
+          title: 'Moved to New Changelist',
+          message: `${filesToMove.length} file(s) → CL #${createResult.changelistNumber}`,
           duration: 3000
         })
         clearSelection()
@@ -635,13 +661,16 @@ export function FileList() {
                   className="px-3 py-1.5 bg-p4-darker hover:bg-gray-800 cursor-pointer flex items-center gap-2 select-none"
                   onClick={(e) => { e.stopPropagation(); setShelvedExpanded(!isShelvedExpanded); }}
                 >
-                  <span className="text-gray-400 text-xs">
+                  <span className={`text-xs ${isReviewRequested ? 'text-purple-300' : 'text-gray-400'}`}>
                     {isShelvedExpanded ? '▼' : '▶'}
                   </span>
-                  <span className={`text-xs font-semibold uppercase tracking-wider ${isReviewRequested ? 'text-purple-400' : 'text-yellow-500/80'}`}>
-                    {isReviewRequested ? 'Shelved Files (Requested)' : 'Shelved Files'}
+                  <span className={`text-xs ${isReviewRequested ? 'text-purple-300' : 'text-yellow-500/80'}`}>
+                    {isReviewRequested ? '🟣' : '📦'}
                   </span>
-                  <span className="text-xs text-gray-500 bg-gray-800 px-1.5 rounded-full">
+                  <span className={`text-xs font-semibold uppercase tracking-wider ${isReviewRequested ? 'text-purple-300' : 'text-yellow-500/80'}`}>
+                    {isReviewRequested ? 'Shelved Files (PR Requested)' : 'Shelved Files'}
+                  </span>
+                  <span className={`text-xs px-1.5 rounded-full ${isReviewRequested ? 'text-purple-200 bg-purple-900/40' : 'text-gray-500 bg-gray-800'}`}>
                     {shelvedFiles.length}
                   </span>
                 </div>
@@ -716,10 +745,10 @@ export function FileList() {
                   ))}
                 <div className="border-t border-p4-border my-1" />
                 <button
-                  onClick={handleMoveToJunk}
-                  className="w-full px-4 py-2 text-left text-sm hover:bg-gray-700 text-yellow-400"
+                  onClick={handleMoveToNewChangelist}
+                  className="w-full px-4 py-2 text-left text-sm hover:bg-gray-700 text-p4-blue"
                 >
-                  + New Junk Changelist
+                  + New Changelist
                 </button>
               </div>
             )}

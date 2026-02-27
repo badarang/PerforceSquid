@@ -36,53 +36,110 @@ body {
 .diff-view {
   font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
   font-size: 13px;
-  line-height: 1.5;
+  line-height: 1.45;
+  background: #0d1117;
 }
 
 .diff-line {
   display: flex;
   white-space: pre;
+  border-top: 1px solid transparent;
+  border-bottom: 1px solid transparent;
 }
 
 .diff-line-number {
   min-width: 50px;
   padding: 0 8px;
   text-align: right;
-  color: #6e7681;
+  color: #8b949e;
   background: #161b22;
   user-select: none;
+  border-right: 1px solid #30363d;
 }
 
 .diff-line-content {
   flex: 1;
-  padding: 0 8px;
+  padding: 0 10px;
 }
 
 .diff-line-add {
-  background: rgba(46, 160, 67, 0.15);
+  background: rgba(46, 160, 67, 0.18);
+  border-top-color: rgba(46, 160, 67, 0.25);
+  border-bottom-color: rgba(46, 160, 67, 0.25);
 }
 
 .diff-line-add .diff-line-content {
-  background: rgba(46, 160, 67, 0.2);
+  color: #c9f5d8;
+}
+
+.diff-line-add .diff-line-number {
+  background: rgba(22, 56, 34, 0.9);
 }
 
 .diff-line-delete {
-  background: rgba(248, 81, 73, 0.15);
+  background: rgba(248, 81, 73, 0.18);
+  border-top-color: rgba(248, 81, 73, 0.25);
+  border-bottom-color: rgba(248, 81, 73, 0.25);
 }
 
 .diff-line-delete .diff-line-content {
-  background: rgba(248, 81, 73, 0.2);
+  color: #ffd8d6;
+}
+
+.diff-line-delete .diff-line-number {
+  background: rgba(66, 24, 24, 0.9);
 }
 
 .diff-line-context {
-  background: #1e1e1e;
+  background: #0d1117;
+  color: #c9d1d9;
 }
 
 .diff-hunk-header {
-  background: rgba(56, 139, 253, 0.15);
+  background: #161b22;
   color: #8b949e;
   padding: 4px 8px;
   font-style: italic;
+  border-top: 1px solid #30363d;
+  border-bottom: 1px solid #30363d;
+}
+
+/* DiffViewer-specific row classes (GitHub Desktop-like single-pane) */
+.ghdiff-add {
+  background: rgba(46, 160, 67, 0.18);
+  color: #c9f5d8;
+  border-top-color: rgba(46, 160, 67, 0.25);
+  border-bottom-color: rgba(46, 160, 67, 0.25);
+}
+
+.ghdiff-delete {
+  background: rgba(248, 81, 73, 0.18);
+  color: #ffd8d6;
+  border-top-color: rgba(248, 81, 73, 0.25);
+  border-bottom-color: rgba(248, 81, 73, 0.25);
+}
+
+.ghdiff-context {
+  background: #0d1117;
+  color: #c9d1d9;
+}
+
+.gh-num {
+  width: 42px;
+  padding-right: 8px;
+  text-align: right;
+  color: #8b949e;
+  background: #161b22;
+  border-right: 1px solid #30363d;
+  opacity: 0.95;
+}
+
+.ghdiff-add .gh-num {
+  background: rgba(22, 56, 34, 0.9);
+}
+
+.ghdiff-delete .gh-num {
+  background: rgba(66, 24, 24, 0.9);
 }
 
 /* Blame viewer styles - Rider-like annotation */

@@ -232,6 +232,7 @@ export function Sidebar({ onSelectChangelist }: SidebarProps) {
               const fileCount = getFileCount(cl.number === 0 ? 'default' : cl.number)
               const isSelected = selectedChangelist === (cl.number === 0 ? 'default' : cl.number)
               const clLabel = cl.number === 0 ? 'default' : cl.number
+              const isReviewRequested = !!cl.reviewId || !!cl.reviewStatus || cl.description.includes('#review')
 
               return (
                 <li
@@ -241,8 +242,12 @@ export function Sidebar({ onSelectChangelist }: SidebarProps) {
                   className={`
                     group px-3 py-2 cursor-pointer border-l-2 transition-colors relative
                     ${isSelected
-                      ? 'bg-p4-dark border-l-p4-blue text-white'
-                      : 'border-l-transparent hover:bg-p4-dark/50 text-gray-400'
+                      ? (isReviewRequested
+                        ? 'bg-purple-950/30 border-l-purple-400 text-white'
+                        : 'bg-p4-dark border-l-p4-blue text-white')
+                      : (isReviewRequested
+                        ? 'border-l-transparent bg-purple-950/15 hover:bg-purple-900/25 text-gray-300'
+                        : 'border-l-transparent hover:bg-p4-dark/50 text-gray-400')
                     }
                   `}
                 >

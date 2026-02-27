@@ -54,8 +54,11 @@ function linkifyLine(line: string, jiraBaseUrl?: string): Array<{ text: string; 
 export function JiraPanel({ isOpen, onClose }: JiraPanelProps) {
   const [pathValue, setPathValue] = useState('')
   const [status, setStatus] = useState<JiraPanelStatus | null>(null)
-  const [projectKey, setProjectKey] = useState('JJRHB')
+  const [projectKey, setProjectKey] = useState('JJRHB-829')
+  const [trackAssignee, setTrackAssignee] = useState('Haein Oh')
+  const [trackProjectKey, setTrackProjectKey] = useState('JJRHB-829')
   const [limit, setLimit] = useState(5)
+  const [trackLimit, setTrackLimit] = useState(20)
   const [ticketValue, setTicketValue] = useState('')
   const [threshold, setThreshold] = useState(0.2)
   const [output, setOutput] = useState('')
@@ -102,6 +105,16 @@ export function JiraPanel({ isOpen, onClose }: JiraPanelProps) {
     setIsBusy(true)
     try {
       const result = await window.jira.recommend(projectKey.trim(), limit)
+      setOutput(result.success ? result.output : `${result.error || 'Failed'}\n${result.output || ''}`)
+    } finally {
+      setIsBusy(false)
+    }
+  }
+
+  const runTrack = async () => {
+    setIsBusy(true)
+    try {
+      const result = await window.jira.track(trackProjectKey.trim(), trackAssignee.trim(), trackLimit)
       setOutput(result.success ? result.output : `${result.error || 'Failed'}\n${result.output || ''}`)
     } finally {
       setIsBusy(false)
@@ -156,15 +169,15 @@ export function JiraPanel({ isOpen, onClose }: JiraPanelProps) {
             </div>
           </section>
 
-          <section className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <section className="grid grid-cols-1 md:grid-cols-3 gap-4">
             <div className="border border-p4-border rounded p-3 bg-p4-dark/40 space-y-3">
               <div className="text-sm text-white font-medium">Recommend</div>
               <div className="flex gap-2">
                 <input
                   value={projectKey}
                   onChange={(e) => setProjectKey(e.target.value)}
-                  placeholder="Project or Ticket (e.g. JJRHB / JJRHB-829)"
-                  className="flex-1 bg-p4-dark border border-p4-border rounded px-3 py-2 text-sm text-white"
+                  placeholder="Project or Ticket (e.g. JJRHB-829)"
+                  className="min-w-0 flex-1 bg-p4-dark border border-p4-border rounded px-2 py-2 text-sm text-white"
                 />
                 <input
                   type="number"
@@ -172,11 +185,42 @@ export function JiraPanel({ isOpen, onClose }: JiraPanelProps) {
                   max={50}
                   value={limit}
                   onChange={(e) => setLimit(Number(e.target.value || 10))}
-                  className="w-24 bg-p4-dark border border-p4-border rounded px-3 py-2 text-sm text-white"
+                  className="w-16 min-w-0 shrink-0 bg-p4-dark border border-p4-border rounded px-2 py-2 text-sm text-white"
                 />
               </div>
               <button onClick={runRecommend} disabled={isBusy || !projectKey.trim()} className="w-full px-3 py-2 text-sm bg-gray-700 hover:bg-gray-600 rounded disabled:opacity-50">
                 Run /recommend
+              </button>
+            </div>
+
+            <div className="border border-p4-border rounded p-3 bg-p4-dark/40 space-y-3">
+              <div className="text-sm text-white font-medium">Track</div>
+              <div className="flex gap-2">
+                <input
+                  value={trackProjectKey}
+                  onChange={(e) => setTrackProjectKey(e.target.value)}
+                  placeholder="Project or Ticket (e.g. JJRHB-829)"
+                  className="min-w-0 flex-1 bg-p4-dark border border-p4-border rounded px-2 py-2 text-sm text-white"
+                />
+              </div>
+              <div className="flex gap-2">
+                <input
+                  value={trackAssignee}
+                  onChange={(e) => setTrackAssignee(e.target.value)}
+                  placeholder='Assignee (e.g. Haein Oh)'
+                  className="min-w-0 flex-1 bg-p4-dark border border-p4-border rounded px-2 py-2 text-sm text-white"
+                />
+                <input
+                  type="number"
+                  min={1}
+                  max={200}
+                  value={trackLimit}
+                  onChange={(e) => setTrackLimit(Number(e.target.value || 20))}
+                  className="w-16 min-w-0 shrink-0 bg-p4-dark border border-p4-border rounded px-2 py-2 text-sm text-white"
+                />
+              </div>
+              <button onClick={runTrack} disabled={isBusy || !trackProjectKey.trim() || !trackAssignee.trim()} className="w-full px-3 py-2 text-sm bg-gray-700 hover:bg-gray-600 rounded disabled:opacity-50">
+                Run /track
               </button>
             </div>
 
@@ -187,7 +231,7 @@ export function JiraPanel({ isOpen, onClose }: JiraPanelProps) {
                   value={ticketValue}
                   onChange={(e) => setTicketValue(e.target.value)}
                   placeholder="Ticket key or URL"
-                  className="flex-1 bg-p4-dark border border-p4-border rounded px-3 py-2 text-sm text-white"
+                  className="min-w-0 flex-1 bg-p4-dark border border-p4-border rounded px-2 py-2 text-sm text-white"
                 />
                 <input
                   type="number"
@@ -196,7 +240,7 @@ export function JiraPanel({ isOpen, onClose }: JiraPanelProps) {
                   step={0.05}
                   value={threshold}
                   onChange={(e) => setThreshold(Number(e.target.value || 0.2))}
-                  className="w-24 bg-p4-dark border border-p4-border rounded px-3 py-2 text-sm text-white"
+                  className="w-16 min-w-0 shrink-0 bg-p4-dark border border-p4-border rounded px-2 py-2 text-sm text-white"
                 />
               </div>
               <button onClick={runSimilar} disabled={isBusy || !ticketValue.trim()} className="w-full px-3 py-2 text-sm bg-gray-700 hover:bg-gray-600 rounded disabled:opacity-50">

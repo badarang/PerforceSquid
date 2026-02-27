@@ -5,6 +5,7 @@ import { useToastContext } from '../App'
 export function SubmitPanel() {
   const {
     files,
+    changelists,
     selectedChangelist,
     checkedFiles,
     submitDescription,
@@ -18,6 +19,7 @@ export function SubmitPanel() {
   const [availableUsers, setAvailableUsers] = useState<string[]>([])
   const [selectedReviewers, setSelectedReviewers] = useState<string[]>([])
   const [reviewerFilter, setReviewerFilter] = useState('')
+  const [existingReviewUrl, setExistingReviewUrl] = useState<string | null>(null)
 
   const filteredFiles = files.filter(file => {
     if (selectedChangelist === 'default') {
@@ -27,6 +29,49 @@ export function SubmitPanel() {
   })
 
   const checkedCount = filteredFiles.filter(f => checkedFiles.has(f.depotFile)).length
+  const selectedClNumber = selectedChangelist === 'default' ? 0 : selectedChangelist
+  const selectedCl = changelists.find((cl) => cl.number === selectedClNumber)
+  const hasExistingReview = !!(selectedClNumber > 0 && (selectedCl?.reviewId || existingReviewUrl))
+
+  useEffect(() => {
+    let cancelled = false
+    const loadReviewUrl = async () => {
+      if (selectedClNumber <= 0) {
+        setExistingReviewUrl(null)
+        return
+      }
+
+      const selected = changelists.find((cl) => cl.number === selectedClNumber)
+      if (selected?.reviewId) {
+        try {
+          const swarmUrl = await window.p4.getSwarmUrl()
+          const url = swarmUrl ? `${swarmUrl.replace(/\/$/, '')}/reviews/${selected.reviewId}` : null
+          if (!cancelled) {
+            setExistingReviewUrl(url)
+          }
+          return
+        } catch {
+          // Fall through to cached URL.
+        }
+      }
+
+      try {
+        const cached = await window.settings.getReviewLink(selectedClNumber)
+        if (!cancelled) {
+          setExistingReviewUrl(cached)
+        }
+      } catch {
+        if (!cancelled) {
+          setExistingReviewUrl(null)
+        }
+      }
+    }
+
+    loadReviewUrl()
+    return () => {
+      cancelled = true
+    }
+  }, [selectedClNumber, changelists])
 
   useEffect(() => {
     const loadReviewerSettings = async () => {
@@ -99,6 +144,14 @@ export function SubmitPanel() {
     }
     // Open in browser
     window.open(url, '_blank')
+  }
+
+  const openUrlInChrome = async (url: string) => {
+    try {
+      await window.jira.openInChrome(url)
+    } catch {
+      window.open(url, '_blank')
+    }
   }
 
   const persistDefaultReviewers = async (nextReviewers: string[]) => {
@@ -208,6 +261,15 @@ export function SubmitPanel() {
     if (requestReviewLockRef.current) {
       return
     }
+    if (hasExistingReview) {
+      toast?.showToast({
+        type: 'info',
+        title: 'Review already requested',
+        message: 'This changelist already has a review. Open the review link instead.',
+        duration: 4000
+      })
+      return
+    }
 
     if (!submitDescription.trim()) {
       toast?.showToast({
@@ -310,13 +372,13 @@ export function SubmitPanel() {
       // Open review page when available (fallback: changelist page)
       if (reviewResult.success && reviewResult.reviewUrl) {
         await window.settings.setReviewLink(targetChangelistId as number, reviewResult.reviewUrl)
-        window.open(reviewResult.reviewUrl, '_blank')
+        await openUrlInChrome(reviewResult.reviewUrl)
       } else {
         const swarmUrl = await window.p4.getSwarmUrl()
         if (swarmUrl) {
           const cleanSwarmUrl = swarmUrl.replace(/\/$/, '')
           const changelistUrl = `${cleanSwarmUrl}/changes/${targetChangelistId}`
-          window.open(changelistUrl, '_blank')
+          await openUrlInChrome(changelistUrl)
         }
       }
 
@@ -342,6 +404,11 @@ export function SubmitPanel() {
       setIsSubmitting(false)
       requestReviewLockRef.current = false
     }
+  }
+
+  const handleOpenExistingReview = () => {
+    if (!existingReviewUrl) return
+    void openUrlInChrome(existingReviewUrl)
   }
 
   return (
@@ -495,13 +562,24 @@ export function SubmitPanel() {
                 </div>
               )}
             </div>
-            <button
-              onClick={handleRequestReview}
-              disabled={isSubmitting || checkedCount === 0 || !submitDescription.trim()}
-              className="px-3 py-1.5 text-xs font-medium bg-purple-600 hover:bg-purple-500 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
-            >
-              Request Review
-            </button>
+            {hasExistingReview ? (
+              <button
+                onClick={handleOpenExistingReview}
+                disabled={!existingReviewUrl}
+                className="px-3 py-1.5 text-xs font-medium bg-indigo-600 hover:bg-indigo-500 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
+                title={selectedCl?.reviewId ? `Review #${selectedCl.reviewId}` : 'Open existing review'}
+              >
+                Open Review
+              </button>
+            ) : (
+              <button
+                onClick={handleRequestReview}
+                disabled={isSubmitting || checkedCount === 0 || !submitDescription.trim()}
+                className="px-3 py-1.5 text-xs font-medium bg-purple-600 hover:bg-purple-500 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
+              >
+                Request Review
+              </button>
+            )}
             <button
               onClick={handleSubmit}
               disabled={isSubmitting || checkedCount === 0 || !submitDescription.trim()}
