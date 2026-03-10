@@ -251,6 +251,10 @@ export class P4Service {
 
   async getOpenedFiles(): Promise<P4File[]> {
     const fileMap = new Map<string, P4File>()
+    const getFileMapKey = (file: P4File) => {
+      const normalizedCl = file.changelist === 0 ? 'default' : String(file.changelist)
+      return `${file.depotFile}@@${normalizedCl}`
+    }
 
     const parseOutput = (output: string, status: 'open' | 'shelved') => {
       const lines = output.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n')
@@ -260,12 +264,13 @@ export class P4Service {
         if (currentFile.depotFile) {
           const file = this.mapZtagToFile(currentFile)
           file.status = status
-          // Prefer opened entries over shelved entries when the same depot file
-          // exists in both states. This keeps Reconcile/Open results visible in
-          // Default changelist instead of being masked by an older shelved copy.
-          const existing = fileMap.get(file.depotFile)
+          // Keep entries separated by changelist so an opened file in default
+          // does not hide an older shelved copy in a numbered changelist.
+          // Within the same changelist+file, prefer opened over shelved.
+          const key = getFileMapKey(file)
+          const existing = fileMap.get(key)
           if (!existing || (existing.status === 'shelved' && status === 'open')) {
-            fileMap.set(file.depotFile, file)
+            fileMap.set(key, file)
           }
         }
         currentFile = {}
@@ -377,25 +382,72 @@ export class P4Service {
           }
           return await this.runCommand(['print', '-q', depotPath])
         })()
-      ])
-
+      ]) 
+      let hunks = this.normalizeDiffOutput(diffOutput)
+      if (!hunks && !oldContent && newContent) {
+        const fileSpec = clientPath || depotPath
+        if (await this.isFileOpenedForAdd(fileSpec)) {
+          hunks = this.createAddOnlyDiffHunks(newContent)
+        }
+      }
       return {
         filePath: depotPath,
         oldContent,
         newContent,
-        hunks: this.normalizeDiffOutput(diffOutput)
+        hunks
       }
     } catch (error: any) {
-      if (error.message?.includes('not opened') || error.message?.includes('no differing files')) {
+      const message = String(error?.message || '')
+      const isKnownNoDiff =
+        message.includes('not opened') ||
+        message.includes('no differing files') ||
+        message.includes('no file(s) at that revision') ||
+        message.includes('no such file(s)')
+
+      if (isKnownNoDiff) {
+        const fileSpec = clientPath || depotPath
+        const newContent = await (async () => {
+          if (clientPath && clientPath.trim() !== '') {
+            try {
+              const fs = await import('fs/promises')
+              const normalizedPath = clientPath.replace(/\//g, '\\')
+              return await fs.readFile(normalizedPath, 'utf8')
+            } catch {
+              // Ignore local read failures and treat as no-diff.
+            }
+          }
+          return ''
+        })()
+        const isAdd = !!newContent && await this.isFileOpenedForAdd(fileSpec)
         return {
           filePath: depotPath,
           oldContent: '',
-          newContent: '',
-          hunks: ''
+          newContent,
+          hunks: isAdd ? this.createAddOnlyDiffHunks(newContent) : ''
         }
       }
       throw error
     }
+  }
+
+  private async isFileOpenedForAdd(fileSpec: string): Promise<boolean> {
+    try {
+      const output = await this.runCommand(['opened', fileSpec])
+      return /\s-\s(add|move\/add|branch|import)\b/i.test(output)
+    } catch {
+      return false
+    }
+  }
+
+  private createAddOnlyDiffHunks(content: string): string {
+    const normalized = content.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+    if (normalized.length === 0) {
+      return '@@ -0,0 +1,0 @@'
+    }
+    const lines = normalized.split('\n')
+    const hunkHeader = `@@ -0,0 +1,${lines.length} @@`
+    const body = lines.map((line) => `+${line}`).join('\n')
+    return `${hunkHeader}\n${body}`
   }
 
   private normalizeDiffOutput(raw: string): string {

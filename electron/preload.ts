@@ -54,6 +54,7 @@ const p4Api = {
     ipcRenderer.invoke('p4:annotate', filePath),
   readFile: (filePath: string) => ipcRenderer.invoke('p4:readFile', filePath),
   saveFile: (filePath: string, content: string) => ipcRenderer.invoke('p4:saveFile', filePath, content),
+  openInRider: (filePath: string) => ipcRenderer.invoke('p4:openInRider', filePath),
   // Stream Graph APIs
   getDepots: () => ipcRenderer.invoke('p4:getDepots'),
   getStreams: (depot?: string) => ipcRenderer.invoke('p4:getStreams', depot),
@@ -69,14 +70,25 @@ const p4Api = {
 const settingsApi = {
   getAutoLaunch: () => ipcRenderer.invoke('settings:getAutoLaunch'),
   setAutoLaunch: (enabled: boolean) => ipcRenderer.invoke('settings:setAutoLaunch', enabled),
+  getRiderPath: () => ipcRenderer.invoke('settings:getRiderPath'),
+  setRiderPath: (riderPath: string) => ipcRenderer.invoke('settings:setRiderPath', riderPath),
   getDefaultReviewers: () => ipcRenderer.invoke('settings:getDefaultReviewers'),
   setDefaultReviewers: (reviewers: string[]) => ipcRenderer.invoke('settings:setDefaultReviewers', reviewers),
   getReviewLink: (changelist: number) => ipcRenderer.invoke('settings:getReviewLink', changelist),
   setReviewLink: (changelist: number, reviewUrl: string) => ipcRenderer.invoke('settings:setReviewLink', changelist, reviewUrl),
+  getNotes: () => ipcRenderer.invoke('settings:getNotes'),
+  setNotes: (notesText: string) => ipcRenderer.invoke('settings:setNotes', notesText),
+  getLayoutPresets: () => ipcRenderer.invoke('settings:getLayoutPresets'),
+  setLayoutPresets: (presets: Record<string, { main: number[]; detailsLeft: number[]; window: { width: number; height: number }; updatedAt: string }>) =>
+    ipcRenderer.invoke('settings:setLayoutPresets', presets),
+  getWindowBounds: () => ipcRenderer.invoke('settings:getWindowBounds'),
+  setWindowBounds: (bounds: { width: number; height: number }) => ipcRenderer.invoke('settings:setWindowBounds', bounds),
 }
 
 const dialogApi = {
   openDirectory: () => ipcRenderer.invoke('dialog:openDirectory'),
+  openFile: (options?: { filters?: Array<{ name: string; extensions: string[] }> }) =>
+    ipcRenderer.invoke('dialog:openFile', options),
 }
 
 const jiraApi = {

@@ -11,8 +11,21 @@ const jiraService = new JiraService()
 
 interface IntegrationSettings {
   jiraBotPath?: string
+  riderPath?: string
   defaultReviewers?: string[]
   reviewLinks?: Record<string, string>
+  notesText?: string
+  layoutPresets?: Record<string, LayoutPreset>
+}
+
+interface LayoutPreset {
+  main: number[]
+  detailsLeft: number[]
+  window: {
+    width: number
+    height: number
+  }
+  updatedAt: string
 }
 
 function getIntegrationSettingsPath(): string {
@@ -285,6 +298,46 @@ ipcMain.handle('p4:saveFile', async (_, filePath: string, content: string) => {
   }
 })
 
+ipcMain.handle('p4:openInRider', async (_, filePath: string) => {
+  try {
+    const normalizedPath = String(filePath || '').trim()
+    if (!normalizedPath) {
+      return { success: false, message: 'No local file path was provided.' }
+    }
+
+    if (!fs.existsSync(normalizedPath)) {
+      return { success: false, message: 'Local file was not found.' }
+    }
+
+    const settings = loadIntegrationSettings()
+    const riderPath = String(settings.riderPath || '').trim()
+    if (!riderPath) {
+      return { success: false, message: 'Rider path is not configured. Set it in Settings.' }
+    }
+
+    if (!fs.existsSync(riderPath)) {
+      return { success: false, message: 'Configured Rider executable was not found. Update it in Settings.' }
+    }
+
+    await new Promise<void>((resolve, reject) => {
+      const child = spawn(riderPath, [normalizedPath], {
+        detached: true,
+        stdio: 'ignore',
+      })
+
+      child.once('error', reject)
+      child.once('spawn', () => {
+        child.unref()
+        resolve()
+      })
+    })
+
+    return { success: true }
+  } catch (err: any) {
+    return { success: false, message: err.message || 'Failed to open Rider.' }
+  }
+})
+
 // Stream Graph IPC Handlers
 ipcMain.handle('p4:getDepots', async () => {
   return p4Service.getDepots()
@@ -324,10 +377,25 @@ ipcMain.handle('settings:getAutoLaunch', () => {
   return settings.openAtLogin
 })
 
+function getAutoLaunchConfig(): { path?: string; args?: string[] } {
+  if (app.isPackaged) {
+    // Packaged apps can launch directly by executable path.
+    return { path: app.getPath('exe') }
+  }
+
+  // In dev, Electron needs the app path argument (e.g. `electron.exe .`).
+  return {
+    path: process.execPath,
+    args: [app.getAppPath()],
+  }
+}
+
 ipcMain.handle('settings:setAutoLaunch', (_, enabled: boolean) => {
+  const launchConfig = getAutoLaunchConfig()
   app.setLoginItemSettings({
     openAtLogin: enabled,
-    path: app.getPath('exe')
+    path: launchConfig.path,
+    args: launchConfig.args,
   })
   return { success: true }
 })
@@ -335,6 +403,21 @@ ipcMain.handle('settings:setAutoLaunch', (_, enabled: boolean) => {
 ipcMain.handle('settings:getDefaultReviewers', () => {
   const settings = loadIntegrationSettings()
   return Array.isArray(settings.defaultReviewers) ? settings.defaultReviewers : []
+})
+
+ipcMain.handle('settings:getRiderPath', () => {
+  const settings = loadIntegrationSettings()
+  return typeof settings.riderPath === 'string' ? settings.riderPath : ''
+})
+
+ipcMain.handle('settings:setRiderPath', (_, riderPath: string) => {
+  const normalizedPath = String(riderPath || '').trim()
+  if (normalizedPath && !fs.existsSync(normalizedPath)) {
+    return { success: false, message: 'Selected Rider executable does not exist.' }
+  }
+
+  updateIntegrationSettings({ riderPath: normalizedPath })
+  return { success: true }
 })
 
 ipcMain.handle('settings:setDefaultReviewers', (_, reviewers: string[]) => {
@@ -357,6 +440,74 @@ ipcMain.handle('settings:setReviewLink', (_, changelist: number, reviewUrl: stri
   const links = { ...(settings.reviewLinks || {}) }
   links[String(changelist)] = String(reviewUrl || '').trim()
   updateIntegrationSettings({ reviewLinks: links })
+  return { success: true }
+})
+
+ipcMain.handle('settings:getNotes', () => {
+  const settings = loadIntegrationSettings()
+  return typeof settings.notesText === 'string' ? settings.notesText : ''
+})
+
+ipcMain.handle('settings:setNotes', (_, notesText: string) => {
+  updateIntegrationSettings({ notesText: String(notesText || '') })
+  return { success: true }
+})
+
+ipcMain.handle('settings:getLayoutPresets', () => {
+  const settings = loadIntegrationSettings()
+  const raw = settings.layoutPresets
+  if (!raw || typeof raw !== 'object') return {}
+
+  const normalized: Record<string, LayoutPreset> = {}
+  for (const [name, preset] of Object.entries(raw)) {
+    if (!preset || typeof preset !== 'object') continue
+    const main = Array.isArray(preset.main) ? preset.main.map(Number).filter((n) => Number.isFinite(n) && n > 0) : []
+    const detailsLeft = Array.isArray(preset.detailsLeft) ? preset.detailsLeft.map(Number).filter((n) => Number.isFinite(n) && n > 0) : []
+    const width = Number(preset.window?.width)
+    const height = Number(preset.window?.height)
+    const updatedAt = typeof preset.updatedAt === 'string' ? preset.updatedAt : new Date().toISOString()
+    if (main.length === 4 && detailsLeft.length === 2 && Number.isFinite(width) && Number.isFinite(height) && width >= 800 && height >= 600) {
+      normalized[name] = { main, detailsLeft, window: { width, height }, updatedAt }
+    }
+  }
+  return normalized
+})
+
+ipcMain.handle('settings:setLayoutPresets', (_, presets: Record<string, LayoutPreset>) => {
+  const normalized: Record<string, LayoutPreset> = {}
+  for (const [name, preset] of Object.entries(presets || {})) {
+    const safeName = String(name || '').trim()
+    if (!safeName) continue
+    const main = Array.isArray(preset?.main) ? preset.main.map(Number).filter((n) => Number.isFinite(n) && n > 0) : []
+    const detailsLeft = Array.isArray(preset?.detailsLeft) ? preset.detailsLeft.map(Number).filter((n) => Number.isFinite(n) && n > 0) : []
+    const width = Number(preset?.window?.width)
+    const height = Number(preset?.window?.height)
+    if (main.length !== 4 || detailsLeft.length !== 2 || !Number.isFinite(width) || !Number.isFinite(height) || width < 800 || height < 600) continue
+    normalized[safeName] = {
+      main,
+      detailsLeft,
+      window: { width, height },
+      updatedAt: typeof preset?.updatedAt === 'string' ? preset.updatedAt : new Date().toISOString(),
+    }
+  }
+  updateIntegrationSettings({ layoutPresets: normalized })
+  return { success: true }
+})
+
+ipcMain.handle('settings:getWindowBounds', (event) => {
+  const win = BrowserWindow.fromWebContents(event.sender) || mainWindow
+  if (!win) return { width: 1280, height: 800 }
+  const { width, height } = win.getBounds()
+  return { width, height }
+})
+
+ipcMain.handle('settings:setWindowBounds', (event, bounds: { width: number; height: number }) => {
+  const win = BrowserWindow.fromWebContents(event.sender) || mainWindow
+  if (!win) return { success: false }
+  const width = Math.max(800, Math.floor(Number(bounds?.width) || 0))
+  const height = Math.max(600, Math.floor(Number(bounds?.height) || 0))
+  win.setSize(width, height)
+  win.center()
   return { success: true }
 })
 
@@ -414,6 +565,17 @@ import { dialog } from 'electron'
 ipcMain.handle('dialog:openDirectory', async () => {
   const result = await dialog.showOpenDialog(mainWindow!, {
     properties: ['openDirectory']
+  })
+  if (result.canceled) {
+    return null
+  }
+  return result.filePaths[0]
+})
+
+ipcMain.handle('dialog:openFile', async (_, options?: { filters?: Array<{ name: string; extensions: string[] }> }) => {
+  const result = await dialog.showOpenDialog(mainWindow!, {
+    properties: ['openFile'],
+    filters: Array.isArray(options?.filters) ? options.filters : undefined
   })
   if (result.canceled) {
     return null

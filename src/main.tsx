@@ -1,5 +1,7 @@
 import React from 'react'
 import ReactDOM from 'react-dom/client'
+import 'react-diff-view/style/index.css'
+import './monaco'
 import App from './App'
 import { DiffWindow } from './components/DiffWindow'
 import './index.css'

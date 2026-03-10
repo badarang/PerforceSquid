@@ -104,6 +104,28 @@ export function FileList() {
     return file.clientFile || file.depotFile
   }
 
+  const getLocalFilePath = (file: typeof files[0]) => {
+    const candidate = (file.clientFile || '').trim()
+    if (!candidate) return null
+    if (/^[A-Za-z]:[\\/]/.test(candidate) || candidate.startsWith('\\\\')) {
+      return candidate
+    }
+    return null
+  }
+
+  const canOpenInEditor = (file: typeof files[0]) => {
+    return file.action !== 'delete' && !!getLocalFilePath(file)
+  }
+
+  const handleFileDoubleClick = async (file: typeof files[0]) => {
+    if (canOpenInEditor(file)) {
+      await window.p4.openDiffWindow(file, 'edit')
+      return
+    }
+
+    await window.p4.openDiffWindow(file, 'diff')
+  }
+
   const handleDragStart = (e: React.DragEvent, file: typeof files[0]) => {
     // If the dragged file is checked, drag all checked files
     // Otherwise, drag only this file
@@ -202,6 +224,42 @@ export function FileList() {
       })
     } finally {
       setIsProcessing(false)
+    }
+  }
+
+  const handleOpenInRider = async () => {
+    if (!contextMenu) return
+
+    const localFilePath = getLocalFilePath(contextMenu.file)
+    setContextMenu(null)
+
+    if (!localFilePath) {
+      toast?.showToast({
+        type: 'error',
+        title: 'Cannot open in Rider',
+        message: 'This file does not have a local workspace path.',
+        duration: 4000
+      })
+      return
+    }
+
+    try {
+      const result = await window.p4.openInRider(localFilePath)
+      if (!result.success) {
+        toast?.showToast({
+          type: 'error',
+          title: 'Failed to open Rider',
+          message: result.message || 'Unknown error',
+          duration: 5000
+        })
+      }
+    } catch (err: any) {
+      toast?.showToast({
+        type: 'error',
+        title: 'Failed to open Rider',
+        message: err.message || 'Unknown error',
+        duration: 5000
+      })
     }
   }
 
@@ -577,6 +635,15 @@ export function FileList() {
   const renderFileItem = (file: typeof files[0], index: number, source: 'shelved' | 'opened') => {
     const isSelected = selectedFile?.depotFile === file.depotFile
     const isChecked = checkedFiles.has(file.depotFile)
+    const filePath = getFilePath(file)
+    const isMetaFile = filePath.toLowerCase().endsWith('.meta')
+    const iconColorClass = actionColors[file.action] || 'text-gray-400'
+    const actionBgClass =
+      !isMetaFile && file.action === 'edit'
+        ? 'bg-yellow-900/10 hover:bg-yellow-900/20'
+        : !isMetaFile && file.action === 'add'
+          ? 'bg-green-900/10 hover:bg-green-900/20'
+          : 'hover:bg-gray-800'
     const paddingClass = source === 'shelved' ? 'pl-9 pr-3' : 'px-3'
     
     return (
@@ -586,11 +653,11 @@ export function FileList() {
         onDragStart={(e) => handleDragStart(e, file)}
         onContextMenu={(e) => handleContextMenu(e, file)}
         onClick={(e) => handleFileClick(e, file, index, source)}
-        onDoubleClick={() => window.p4.openDiffWindow(file)}
+        onDoubleClick={() => void handleFileDoubleClick(file)}
         className={`
           flex items-center gap-2 ${paddingClass} py-2 cursor-pointer
-          hover:bg-gray-800 transition-colors
-          ${isSelected ? 'bg-gray-700' : isChecked ? 'bg-gray-800' : ''}
+          transition-colors
+          ${isSelected ? 'bg-gray-700' : isChecked ? 'bg-gray-800' : isMetaFile ? 'bg-cyan-900/20 hover:bg-cyan-900/30 border-l-2 border-l-cyan-500/60' : actionBgClass}
         `}
       >
         <input
@@ -606,20 +673,20 @@ export function FileList() {
           className="w-4 h-4 rounded border-gray-600 bg-gray-700 text-p4-blue focus:ring-p4-blue focus:ring-offset-0"
         />
         <div className="flex items-center gap-2 flex-1 min-w-0">
-          <span className={`font-mono text-sm ${actionColors[file.action] || 'text-gray-400'}`}>
+          <span className={`font-mono text-sm ${iconColorClass}`}>
             {actionIcons[file.action] || '?'}
           </span>
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2">
               <div 
                 className="text-sm text-gray-200 truncate" 
-                title={getFileName(getFilePath(file))}
+                title={getFileName(filePath)}
               >
-                {getFileName(getFilePath(file))}
+                {getFileName(filePath)}
               </div>
             </div>
-            <div className="text-xs text-gray-500 truncate" title={getFilePath(file)}>
-              {getFilePath(file)}
+            <div className="text-xs text-gray-500 truncate" title={filePath}>
+              {filePath}
             </div>
           </div>
         </div>
@@ -699,6 +766,18 @@ export function FileList() {
           style={{ left: contextMenu.x, top: contextMenu.y }}
           onClick={(e) => e.stopPropagation()}
         >
+          {/* Move to... submenu */}
+          <button
+            onClick={handleOpenInRider}
+            disabled={isProcessing || !getLocalFilePath(contextMenu.file)}
+            className="w-full px-4 py-2 text-left text-sm hover:bg-gray-700 flex items-center gap-2 text-gray-200 disabled:opacity-50"
+          >
+            <span>R</span>
+            <span>Open in Rider</span>
+          </button>
+
+          <div className="border-t border-p4-border my-1" />
+
           {/* Move to... submenu */}
           <div className="relative">
             <button

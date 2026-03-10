@@ -1,4 +1,4 @@
-import { useEffect, useState, createContext, useContext } from 'react'
+import { useEffect, useRef, useState, createContext, useContext } from 'react'
 import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels'
 import { useP4Store } from './stores/p4Store'
 import { Sidebar } from './components/Sidebar'
@@ -10,7 +10,6 @@ import { ChangelistDiff } from './components/ChangelistDiff'
 import { ToastContainer, ToastMessage } from './components/Toast'
 import { SubmitPanel } from './components/SubmitPanel'
 import { CommitGraph } from './components/CommitGraph'
-import iconSvg from './assets/icon.svg'
 
 // Toast Context
 interface ToastContextType {
@@ -18,6 +17,20 @@ interface ToastContextType {
 }
 export const ToastContext = createContext<ToastContextType | null>(null)
 export const useToastContext = () => useContext(ToastContext)
+
+interface LayoutPresetSnapshot {
+  main: number[]
+  detailsLeft: number[]
+  window: {
+    width: number
+    height: number
+  }
+}
+
+interface PanelGroupHandle {
+  getLayout: () => number[]
+  setLayout: (layout: number[]) => void
+}
 
 let toastIdCounter = 0
 
@@ -28,6 +41,9 @@ function App() {
   const [depotPath, setDepotPath] = useState<string | null>(null)
   const [toasts, setToasts] = useState<ToastMessage[]>([])
   const [selectedHistoryChangelist, setSelectedHistoryChangelist] = useState<number | null>(null)
+  const [historyRefreshToken, setHistoryRefreshToken] = useState(0)
+  const mainLayoutRef = useRef<PanelGroupHandle | null>(null)
+  const detailsLeftLayoutRef = useRef<PanelGroupHandle | null>(null)
 
   const showToast = (toast: Omit<ToastMessage, 'id'>) => {
     const id = `toast-${++toastIdCounter}`
@@ -96,17 +112,43 @@ function App() {
     await refresh()
   }
 
+  const handleHistoryRefresh = () => {
+    setHistoryRefreshToken((prev) => prev + 1)
+  }
+
+  const captureLayoutPreset = async (): Promise<LayoutPresetSnapshot | null> => {
+    const main = mainLayoutRef.current?.getLayout()
+    const detailsLeft = detailsLeftLayoutRef.current?.getLayout()
+    if (!main || !detailsLeft || main.length !== 4 || detailsLeft.length !== 2) {
+      return null
+    }
+    const windowBounds = await window.settings.getWindowBounds()
+    return { main, detailsLeft, window: windowBounds }
+  }
+
+  const applyLayoutPreset = async (snapshot: LayoutPresetSnapshot) => {
+    if (snapshot.window?.width && snapshot.window?.height) {
+      await window.settings.setWindowBounds(snapshot.window)
+    }
+    if (snapshot.main.length === 4) {
+      mainLayoutRef.current?.setLayout(snapshot.main)
+    }
+    if (snapshot.detailsLeft.length === 2) {
+      detailsLeftLayoutRef.current?.setLayout(snapshot.detailsLeft)
+    }
+  }
+
   if (checkingClient) {
     return (
       <div className="h-screen bg-p4-dark flex items-center justify-center">
-        <div className="flex flex-col items-center">
-          <img 
-            src={iconSvg} 
-            className="w-12 h-12 mb-4 block animate-doom-chit" 
-            alt="Loading..." 
-          />
-          <div className="text-xl text-gray-300 mb-2">Starting PerforceSquid...</div>
-          <div className="text-sm text-gray-500">Please wait</div>
+        <div className="w-[360px] max-w-[90vw] p-6 border border-p4-border rounded-lg bg-p4-darker animate-pulse">
+          <div className="h-5 w-44 rounded bg-gray-700/70 mb-3" />
+          <div className="h-3 w-24 rounded bg-gray-700/50 mb-5" />
+          <div className="space-y-2">
+            <div className="h-2.5 w-full rounded bg-gray-700/60" />
+            <div className="h-2.5 w-5/6 rounded bg-gray-700/50" />
+            <div className="h-2.5 w-3/4 rounded bg-gray-700/40" />
+          </div>
         </div>
       </div>
     )
@@ -119,14 +161,14 @@ function App() {
   if (!info && isLoading) {
     return (
       <div className="h-screen bg-p4-dark flex items-center justify-center">
-        <div className="flex flex-col items-center">
-          <img 
-            src={iconSvg} 
-            className="w-12 h-12 mb-4 block animate-doom-chit" 
-            alt="Loading..." 
-          />
-          <div className="text-xl text-gray-300 mb-2">Connecting to Perforce...</div>
-          <div className="text-sm text-gray-500">Please wait</div>
+        <div className="w-[360px] max-w-[90vw] p-6 border border-p4-border rounded-lg bg-p4-darker animate-pulse">
+          <div className="h-5 w-52 rounded bg-gray-700/70 mb-3" />
+          <div className="h-3 w-24 rounded bg-gray-700/50 mb-5" />
+          <div className="space-y-2">
+            <div className="h-2.5 w-full rounded bg-gray-700/60" />
+            <div className="h-2.5 w-4/5 rounded bg-gray-700/50" />
+            <div className="h-2.5 w-3/5 rounded bg-gray-700/40" />
+          </div>
         </div>
       </div>
     )
@@ -172,10 +214,18 @@ function App() {
         <Toolbar
           currentStream={depotPath}
           onStreamChange={handleStreamChange}
+          onHistoryRefresh={handleHistoryRefresh}
+          captureLayoutPreset={captureLayoutPreset}
+          applyLayoutPreset={applyLayoutPreset}
         />
 
-        {/* Main Content - 3 Panel Layout */}
-        <PanelGroup direction="horizontal" autoSaveId="main-layout" className="flex-1 flex overflow-hidden">
+        {/* Main Content - 4 Panel Layout */}
+        <PanelGroup
+          ref={(instance) => { mainLayoutRef.current = instance as PanelGroupHandle | null }}
+          direction="horizontal"
+          autoSaveId="main-layout"
+          className="flex-1 flex overflow-hidden"
+        >
           {/* Left Panel: My Changes (Pending Changelists) */}
           <Panel defaultSize={15} minSize={10} className="border-r border-p4-border flex-shrink-0 flex flex-col">
             <Sidebar onSelectChangelist={() => setSelectedHistoryChangelist(null)} />
@@ -190,38 +240,42 @@ function App() {
               depotPath={depotPath}
               onSelectChangelist={setSelectedHistoryChangelist}
               selectedChangelist={selectedHistoryChangelist}
+              refreshToken={historyRefreshToken}
             />
           </Panel>
           <PanelResizeHandle className='resize-handle-outer'>
             <div className='resize-handle-inner' />
           </PanelResizeHandle>
 
-          {/* Right Panel: Detail View */}
-          <Panel defaultSize={60} minSize={30} className="flex-1 flex flex-col min-w-0">
+          {/* Third Panel: File List + Commit */}
+          <Panel defaultSize={24} minSize={16} className="border-r border-p4-border flex-shrink-0 min-w-0">
+            <PanelGroup
+              ref={(instance) => { detailsLeftLayoutRef.current = instance as PanelGroupHandle | null }}
+              direction="vertical"
+              autoSaveId="details-layout-left"
+            >
+              <Panel defaultSize={40} minSize={20} className="border-b border-p4-border flex-shrink-0 overflow-hidden">
+                <FileList />
+              </Panel>
+              <PanelResizeHandle className='resize-handle-outer'>
+                <div className='resize-handle-inner' />
+              </PanelResizeHandle>
+              <Panel collapsible={true} defaultSize={25} minSize={15} className="flex-shrink-0 overflow-auto">
+                <SubmitPanel />
+              </Panel>
+            </PanelGroup>
+          </Panel>
+          <PanelResizeHandle className='resize-handle-outer'>
+            <div className='resize-handle-inner' />
+          </PanelResizeHandle>
+
+          {/* Fourth Panel: Diff Only */}
+          <Panel defaultSize={36} minSize={24} className="flex-1 flex flex-col min-w-0 overflow-hidden">
             {selectedHistoryChangelist !== null ? (
-              /* Show submitted changelist diff when history is selected */
               <ChangelistDiff changelist={selectedHistoryChangelist} />
             ) : selectedChangelist !== null ? (
-              /* Show pending changelist details when My Changes is selected */
-              <PanelGroup direction="vertical" autoSaveId="details-layout">
-                <Panel defaultSize={40} minSize={20} className="border-b border-p4-border flex-shrink-0 overflow-hidden">
-                  <FileList />
-                </Panel>
-                <PanelResizeHandle className='resize-handle-outer'>
-                    <div className='resize-handle-inner' />
-                </PanelResizeHandle>
-                <Panel collapsible={true} defaultSize={25} minSize={15} className="flex-shrink-0">
-                  <SubmitPanel />
-                </Panel>
-                <PanelResizeHandle className='resize-handle-outer'>
-                    <div className='resize-handle-inner' />
-                </PanelResizeHandle>
-                <Panel minSize={20} className="flex-1 overflow-hidden">
-                  <DiffViewer />
-                </Panel>
-              </PanelGroup>
+              <DiffViewer />
             ) : (
-              /* Empty state */
               <div className="flex-1 flex items-center justify-center text-gray-500">
                 <div className="text-center">
                   <svg className="w-16 h-16 mx-auto mb-4 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">

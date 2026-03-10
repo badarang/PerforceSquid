@@ -40,6 +40,7 @@ interface P4Store {
   info: P4Info | null
   files: P4File[]
   changelists: P4Changelist[]
+  hasLoadedChangelists: boolean
   selectedFile: P4File | null
   selectedChangelist: number | 'default'
   currentDiff: P4DiffResult | null
@@ -79,6 +80,7 @@ export const useP4Store = create<P4Store>((set, get) => ({
   info: null,
   files: [],
   changelists: [],
+  hasLoadedChangelists: false,
   selectedFile: null,
   selectedChangelist: 'default',
   currentDiff: null,
@@ -164,9 +166,9 @@ export const useP4Store = create<P4Store>((set, get) => ({
   fetchChangelists: async () => {
     try {
       const changelists = await window.p4.getChangelists()
-      set({ changelists, error: null })
+      set({ changelists, hasLoadedChangelists: true, error: null })
     } catch (err: any) {
-      set({ error: err.message })
+      set({ hasLoadedChangelists: true, error: err.message })
     }
   },
 

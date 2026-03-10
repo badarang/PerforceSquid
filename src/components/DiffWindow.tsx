@@ -23,14 +23,9 @@ export function DiffWindow() {
       try {
         const file = JSON.parse(decodeURIComponent(fileParam))
         setSelectedFile(file)
-        
-        // Fetch diff immediately
-        const clientPath = file.clientFile && file.clientFile.trim() !== ''
-          ? file.clientFile
-          : null
-          
-        if (clientPath) {
-          fetchDiff({ ...file, diffPath: clientPath })
+
+        if (mode === 'diff') {
+          fetchDiff(file)
         }
       } catch (e) {
         console.error('Failed to parse file param', e)

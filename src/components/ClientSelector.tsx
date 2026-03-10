@@ -1,5 +1,4 @@
 import { useState, useEffect } from 'react'
-import iconSvg from '../assets/icon.svg'
 
 interface P4Client {
   name: string
@@ -250,10 +249,13 @@ export function ClientSelector({ onClientSelected }: ClientSelectorProps) {
   if (loading && !isCreateMode) {
     return (
       <div className="h-screen bg-p4-dark flex items-center justify-center">
-        <div className="text-center">
-          <img src={iconSvg} className="w-12 h-12 mx-auto mb-4 animate-doom-chit" alt="Loading..." />
-          <div className="text-xl text-gray-300 mb-2">Loading workspaces...</div>
-          <div className="text-sm text-gray-500">Please wait</div>
+        <div className="w-[500px] max-w-[90vw] p-6 border border-p4-border rounded-lg bg-p4-darker animate-pulse">
+          <div className="h-6 w-56 rounded bg-gray-700/70 mb-4" />
+          <div className="space-y-3">
+            {Array.from({ length: 5 }).map((_, idx) => (
+              <div key={idx} className="h-12 rounded bg-gray-700/50" />
+            ))}
+          </div>
         </div>
       </div>
     )
@@ -309,12 +311,7 @@ export function ClientSelector({ onClientSelected }: ClientSelectorProps) {
                     <label className="block text-sm font-medium text-gray-400 mb-1 flex items-center justify-between">
                       <span>Stream</span>
                       {loadingStreams && (
-                        <span className="flex items-center text-xs text-p4-blue">
-                          <svg className="animate-spin -ml-1 mr-2 h-3 w-3 text-p4-blue" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                          </svg>
-                          Loading...
+                        <span className="inline-block h-3 w-16 rounded bg-p4-blue/30 animate-pulse" aria-label="Loading streams" title="Loading streams">
                         </span>
                       )}
                     </label>

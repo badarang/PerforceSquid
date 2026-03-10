@@ -302,6 +302,9 @@ export function SubmitPanel() {
     requestReviewLockRef.current = true
     setIsSubmitting(true)
 
+    let movedUncheckedWorkspaceFiles: string[] = []
+    let movedFromChangelist: number | null = null
+
     try {
       const finalDescription = submitDescription.trim()
 
@@ -337,11 +340,13 @@ export function SubmitPanel() {
       } else {
         // If Numbered CL: Move unchecked files away, update description
         const uncheckedFiles = filteredFiles
-          .filter(f => !checkedFiles.has(f.depotFile))
+          .filter(f => f.status !== 'shelved' && !checkedFiles.has(f.depotFile))
           .map(f => f.depotFile)
 
         if (uncheckedFiles.length > 0) {
           await window.p4.reopenFiles(uncheckedFiles, 'default')
+          movedUncheckedWorkspaceFiles = uncheckedFiles
+          movedFromChangelist = targetChangelistId as number
         }
         await window.p4.editChangelist(targetChangelistId as number, finalDescription)
       }
@@ -351,6 +356,11 @@ export function SubmitPanel() {
         if (!shelveResult.success) {
           throw new Error(shelveResult.message)
         }
+      }
+
+      if (movedUncheckedWorkspaceFiles.length > 0 && movedFromChangelist !== null) {
+        await window.p4.reopenFiles(movedUncheckedWorkspaceFiles, movedFromChangelist)
+        movedUncheckedWorkspaceFiles = []
       }
 
       let reviewResult: { success: boolean; review?: any; reviewUrl?: string; message?: string } = { success: false, message: 'Review request failed.' }
@@ -394,6 +404,13 @@ export function SubmitPanel() {
       await refresh()
 
     } catch (err: any) {
+      if (movedUncheckedWorkspaceFiles.length > 0 && movedFromChangelist !== null) {
+        try {
+          await window.p4.reopenFiles(movedUncheckedWorkspaceFiles, movedFromChangelist)
+        } catch {
+          // Best effort restore for temporarily moved files.
+        }
+      }
       toast?.showToast({
         type: 'error',
         title: 'Request Review failed',
@@ -412,34 +429,33 @@ export function SubmitPanel() {
   }
 
   return (
-    <div className="border-t border-p4-border bg-p4-darker p-3">
+    <div className="border-t border-p4-border bg-p4-darker p-3 h-full overflow-auto">
         {/* Description Helper Controls */}
-        <div className="flex flex-wrap items-center gap-2 mb-2">
-          <div className="flex gap-1">
+        <div className="mb-2">
+          <div className="flex items-center gap-1 mb-1.5 min-w-0">
             {prefixes.map(p => (
               <button
                 key={p.label}
                 onClick={() => handlePrefixClick(p.value)}
-                className="px-2 py-0.5 text-xs bg-p4-border hover:bg-gray-600 rounded text-gray-300 transition-colors"
+                className="px-1.5 py-0.5 text-[11px] leading-4 bg-p4-border hover:bg-gray-600 rounded text-gray-300 transition-colors whitespace-nowrap"
                 title={`Add ${p.label} prefix`}
               >
                 {p.label}
               </button>
             ))}
           </div>
-          <div className="h-4 w-px bg-p4-border mx-1"></div>
-          <div className="flex flex-1 items-center gap-1 min-w-[200px]">
+          <div className="flex items-center gap-1 min-w-0">
             <input
               type="text"
               value={issueLink}
               onChange={(e) => handleIssueLinkChange(e.target.value)}
               placeholder="Issue URL or ID"
-              className="flex-1 bg-p4-dark border border-p4-border rounded px-2 py-0.5 text-xs focus:outline-none focus:border-p4-blue"
+              className="flex-1 min-w-[80px] bg-p4-dark border border-p4-border rounded px-2 py-0.5 text-[11px] leading-4 focus:outline-none focus:border-p4-blue"
             />
             <button
               onClick={addIssueLinkToDescription}
               disabled={!issueLink.trim()}
-              className="px-2 py-0.5 text-xs bg-p4-border hover:bg-gray-600 rounded text-gray-300 disabled:opacity-50"
+              className="px-1.5 py-0.5 text-[11px] leading-4 bg-p4-border hover:bg-gray-600 rounded text-gray-300 disabled:opacity-50 whitespace-nowrap"
               title="Append to description"
             >
               Add
@@ -447,7 +463,7 @@ export function SubmitPanel() {
             <button
               onClick={openIssueLink}
               disabled={!issueLink.trim() || !issueLink.startsWith('http')}
-              className="px-2 py-0.5 text-xs bg-p4-border hover:bg-gray-600 rounded text-gray-300 disabled:opacity-50"
+              className="px-1.5 py-0.5 text-[11px] leading-4 bg-p4-border hover:bg-gray-600 rounded text-gray-300 disabled:opacity-50 whitespace-nowrap"
               title="Test Link"
             >
               ↗
@@ -506,18 +522,20 @@ export function SubmitPanel() {
             className="w-full h-20 bg-p4-dark border border-p4-border rounded p-2 text-sm resize-none focus:outline-none focus:border-p4-blue"
           />
         </div>
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <span className="text-xs text-gray-500 whitespace-nowrap">
-            {checkedCount} file(s) selected
-          </span>
-          <div className="flex items-center gap-2 flex-shrink-0">
+        <div className="flex items-center justify-end gap-1.5 min-w-0">
+          <div className="flex items-center gap-1.5 flex-shrink-0">
             <div className="relative">
               <button
                 onClick={() => setShowReviewerPicker((prev) => !prev)}
-                className="px-3 py-1.5 text-xs font-medium bg-gray-700 hover:bg-gray-600 rounded transition-colors whitespace-nowrap"
+                className="px-2 py-1 text-[11px] font-medium bg-gray-700 hover:bg-gray-600 rounded transition-colors whitespace-nowrap"
                 title="Pick default reviewers for Request Review"
               >
-                Reviewers {selectedReviewers.length > 0 ? `(${selectedReviewers.length})` : ''}
+                <span className="inline-flex items-center gap-1">
+                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 20h5v-1a4 4 0 00-5-3.87M17 20H7m10 0v-1c0-.66-.1-1.3-.29-1.87M7 20H2v-1a4 4 0 015-3.87M7 20v-1c0-.66.1-1.3.29-1.87m0 0a5 5 0 019.42 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
+                  </svg>
+                  <span>({selectedReviewers.length})</span>
+                </span>
               </button>
               {showReviewerPicker && (
                 <div className="absolute right-0 bottom-9 w-72 max-h-72 overflow-hidden border border-p4-border rounded bg-p4-darker shadow-lg z-20">
@@ -566,7 +584,7 @@ export function SubmitPanel() {
               <button
                 onClick={handleOpenExistingReview}
                 disabled={!existingReviewUrl}
-                className="px-3 py-1.5 text-xs font-medium bg-indigo-600 hover:bg-indigo-500 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
+                className="px-2 py-1 text-[11px] font-medium bg-indigo-600 hover:bg-indigo-500 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
                 title={selectedCl?.reviewId ? `Review #${selectedCl.reviewId}` : 'Open existing review'}
               >
                 Open Review
@@ -575,15 +593,15 @@ export function SubmitPanel() {
               <button
                 onClick={handleRequestReview}
                 disabled={isSubmitting || checkedCount === 0 || !submitDescription.trim()}
-                className="px-3 py-1.5 text-xs font-medium bg-purple-600 hover:bg-purple-500 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
+                className="px-2 py-1 text-[11px] font-medium bg-purple-600 hover:bg-purple-500 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
               >
-                Request Review
+                Review
               </button>
             )}
             <button
               onClick={handleSubmit}
               disabled={isSubmitting || checkedCount === 0 || !submitDescription.trim()}
-              className="px-3 py-1.5 text-xs font-medium bg-p4-blue hover:bg-blue-600 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
+              className="px-2 py-1 text-[11px] font-medium bg-p4-blue hover:bg-blue-600 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
             >
               {isSubmitting ? 'Submitting...' : `Submit (${checkedCount})`}
             </button>

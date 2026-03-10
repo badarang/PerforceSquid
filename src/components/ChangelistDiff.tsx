@@ -1,5 +1,6 @@
-import { useState, useEffect, useMemo, useRef } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { getUserStyle } from '../utils/userIcon'
+import { PerforceDiffView } from './PerforceDiffView'
 
 interface BlameLine {
   lineNumber: number
@@ -26,77 +27,6 @@ interface ChangelistFile {
 
 interface ChangelistDiffProps {
   changelist: number | null
-}
-
-interface DiffLine {
-  type: 'add' | 'delete' | 'context' | 'hunk' | 'file-header'
-  content: string
-  oldLineNum?: number
-  newLineNum?: number
-}
-
-function parseDiff(diffText: string): DiffLine[] {
-  if (!diffText.trim()) {
-    return []
-  }
-
-  const lines = diffText.split('\n')
-  const result: DiffLine[] = []
-  let oldLineNum = 0
-  let newLineNum = 0
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i]
-    if (line.startsWith('Differences')) {
-      continue
-    }
-
-    if (line.startsWith('====')) {
-      result.push({
-        type: 'file-header',
-        content: line
-      })
-      continue
-    }
-
-    if (line.startsWith('@@')) {
-      const match = line.match(/@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/)
-      if (match) {
-        oldLineNum = parseInt(match[1], 10)
-        newLineNum = parseInt(match[2], 10)
-        result.push({
-          type: 'hunk',
-          content: line
-        })
-      }
-      continue
-    }
-
-    if (line.startsWith(' ')) {
-      result.push({
-        type: 'context',
-        content: line.slice(1),
-        oldLineNum: oldLineNum++,
-        newLineNum: newLineNum++
-      })
-    }
-    else if (line.startsWith('-') && !line.startsWith('---')) {
-      result.push({
-        type: 'delete',
-        content: line.slice(1),
-        oldLineNum: oldLineNum++
-      })
-    }
-    else if (line.startsWith('+') && !line.startsWith('+++')) {
-      result.push({
-        type: 'add',
-        content: line.slice(1),
-        newLineNum: newLineNum++
-      })
-    }
-  }
-
-  return result
 }
 
 const actionColors: Record<string, string> = {
@@ -131,6 +61,7 @@ export function ChangelistDiff({ changelist }: ChangelistDiffProps) {
   const [info, setInfo] = useState<P4Changelist | null>(null)
   const [files, setFiles] = useState<ChangelistFile[]>([])
   const [diff, setDiff] = useState<string>('')
+  const [ignoreFormattingNoise, setIgnoreFormattingNoise] = useState(true)
   const [loading, setLoading] = useState(false)
   const [diffLoading, setDiffLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -244,8 +175,6 @@ export function ChangelistDiff({ changelist }: ChangelistDiffProps) {
     }
   }
 
-  const diffLines = useMemo(() => parseDiff(diff), [diff])
-
   if (!changelist) {
     return (
       <div className="h-full flex items-center justify-center text-gray-500">
@@ -259,8 +188,10 @@ export function ChangelistDiff({ changelist }: ChangelistDiffProps) {
 
   if (loading) {
     return (
-      <div className="h-full flex items-center justify-center text-gray-500">
-        <div className="animate-pulse">Loading changelist #{changelist}...</div>
+      <div className="h-full p-4 space-y-2 animate-pulse">
+        {Array.from({ length: 10 }).map((_, idx) => (
+          <div key={idx} className="h-5 rounded bg-gray-700/50" />
+        ))}
       </div>
     )
   }
@@ -312,6 +243,15 @@ export function ChangelistDiff({ changelist }: ChangelistDiffProps) {
             </div>
           )}
         </div>
+        <label className="mt-3 inline-flex items-center gap-2 text-xs text-gray-300 cursor-pointer select-none hover:text-white">
+          <input
+            type="checkbox"
+            checked={ignoreFormattingNoise}
+            onChange={(e) => setIgnoreFormattingNoise(e.target.checked)}
+            className="rounded border-gray-600 bg-gray-700 text-p4-blue focus:ring-offset-gray-800"
+          />
+          Ignore formatting noise
+        </label>
       </div>
 
       {/* Affected Files */}
@@ -362,8 +302,10 @@ export function ChangelistDiff({ changelist }: ChangelistDiffProps) {
         {selectedFileForBlame ? (
           // Blame View
           blameLoading ? (
-            <div className="p-4 text-center text-gray-500 animate-pulse">
-              Loading blame for {selectedFileForBlame.split('/').pop()}...
+            <div className="p-4 space-y-2 animate-pulse">
+              {Array.from({ length: 10 }).map((_, idx) => (
+                <div key={idx} className="h-5 rounded bg-gray-700/50" />
+              ))}
             </div>
           ) : blameError ? (
             <div className="p-4 text-center">
@@ -478,56 +420,24 @@ export function ChangelistDiff({ changelist }: ChangelistDiffProps) {
                 className="px-3 py-1.5 bg-p4-blue hover:bg-blue-600 rounded text-xs text-white"
                 disabled={diffLoading}
               >
-                {diffLoading ? 'Loading full diff...' : 'Load Full Diff'}
+                {diffLoading ? <span className="inline-block h-3 w-20 rounded bg-white/30 animate-pulse" /> : 'Load Full Diff'}
               </button>
             </div>
           ) : diffLoading ? (
-            <div className="p-4 text-center text-gray-500 animate-pulse">
-              Loading diff...
+            <div className="p-4 space-y-2 animate-pulse">
+              {Array.from({ length: 10 }).map((_, idx) => (
+                <div key={idx} className="h-5 rounded bg-gray-700/50" />
+              ))}
             </div>
-          ) : diffLines.length === 0 ? (
+          ) : !diff.trim() ? (
             <div className="p-4 text-center text-gray-500">
               No diff available (binary file or no changes)
             </div>
           ) : (
-            <div className="diff-view">
-              {diffLines.map((line, index) => {
-                if (line.type === 'file-header') {
-                  return (
-                    <div key={index} className="bg-gray-800 text-gray-300 px-3 py-2 font-semibold border-t border-b border-p4-border mt-2">
-                      {line.content}
-                    </div>
-                  )
-                }
-
-                if (line.type === 'hunk') {
-                  return (
-                    <div key={index} className="diff-hunk-header">
-                      {line.content}
-                    </div>
-                  )
-                }
-
-                const lineClass = line.type === 'add' ? 'diff-line-add' :
-                                  line.type === 'delete' ? 'diff-line-delete' :
-                                  'diff-line-context'
-
-                return (
-                  <div key={index} className={`diff-line ${lineClass}`}>
-                    <span className="diff-line-number">
-                      {line.type === 'add' ? '' : line.oldLineNum || ''}
-                    </span>
-                    <span className="diff-line-number">
-                      {line.type === 'delete' ? '' : line.newLineNum || ''}
-                    </span>
-                    <span className="diff-line-content">
-                      {line.type === 'add' ? '+' : line.type === 'delete' ? '-' : ' '}
-                      {line.content}
-                    </span>
-                  </div>
-                )
-              })}
-            </div>
+            <PerforceDiffView
+              diffText={diff}
+              ignoreFormattingNoise={ignoreFormattingNoise}
+            />
           )
         )}
       </div>

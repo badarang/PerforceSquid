@@ -1,6 +1,5 @@
 import { useP4Store } from '../stores/p4Store'
 import { useToastContext } from '../App'
-import iconSvg from '../assets/icon.svg'
 import { useState, useRef, useEffect } from 'react'
 
 interface SidebarProps {
@@ -10,6 +9,7 @@ interface SidebarProps {
 export function Sidebar({ onSelectChangelist }: SidebarProps) {
   const {
     changelists,
+    hasLoadedChangelists,
     files,
     selectedChangelist,
     setSelectedChangelist,
@@ -217,10 +217,18 @@ export function Sidebar({ onSelectChangelist }: SidebarProps) {
       </div>
 
       <div className="flex-1 overflow-y-auto">
-        {isLoading ? (
-          <div className="flex flex-col items-center justify-center py-8 text-center">
-            <img src={iconSvg} className="w-8 h-8 mb-2 animate-doom-chit" alt="Loading..." />
-            <div className="text-sm text-gray-500">Loading changes...</div>
+        {!hasLoadedChangelists || isLoading ? (
+          <div className="p-3 space-y-2 animate-pulse">
+            {Array.from({ length: 6 }).map((_, idx) => (
+              <div key={idx} className="rounded border border-p4-border/40 bg-p4-dark/40 px-3 py-2">
+                <div className="flex items-center justify-between">
+                  <div className="h-3 w-14 rounded bg-gray-700/70" />
+                  <div className="h-4 w-6 rounded bg-gray-700/70" />
+                </div>
+                <div className="mt-2 h-2.5 w-11/12 rounded bg-gray-700/60" />
+                <div className="mt-1 h-2.5 w-8/12 rounded bg-gray-700/50" />
+              </div>
+            ))}
           </div>
         ) : changelists.length === 0 ? (
           <div className="p-3 text-sm text-gray-500">

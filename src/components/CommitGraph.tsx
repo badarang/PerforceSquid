@@ -1,6 +1,5 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
-import { getUserColor, getUserInitials } from '../utils/userIcon'
-import iconSvg from '../assets/icon.svg'
+import { getUserInitials } from '../utils/userIcon'
 
 interface SubmittedChangelist {
   number: number
@@ -21,43 +20,43 @@ interface CommitGraphProps {
   depotPath: string | null
   onSelectChangelist: (cl: number) => void
   selectedChangelist: number | null
+  refreshToken?: number
 }
 
 // Graph constants
-const GRAPH_WIDTH = 100
-const NODE_RADIUS = 5
+const GRAPH_WIDTH = 46
+const NODE_RADIUS = 4
 const ROW_HEIGHT = 56
-const LANE_WIDTH = 20
-const LANE_OFFSET = 24
+const LANE_WIDTH = 8
+const LANE_OFFSET = 10
 
-// Stream type colors
-const STREAM_COLORS: Record<string, string> = {
-  mainline: '#22c55e',   // green
-  main: '#22c55e',
-  development: '#3b82f6', // blue
-  dev: '#3b82f6',
-  release: '#a855f7',    // purple
-  feature: '#eab308',    // yellow
-  task: '#f97316',       // orange
-  hotfix: '#ef4444',     // red
-  virtual: '#06b6d4',    // cyan
-  default: '#6b7280',    // gray
+function getDistinctColor(index: number, seed: number = 0): string {
+  // Golden-angle hue stepping guarantees unique hue values per index.
+  const hue = (seed + index * 137.50776405003785) % 360
+  const saturation = 66 + (index % 3) * 6 // 66, 72, 78
+  const lightness = 52 - (index % 2) * 6 // 52, 46
+  return `hsl(${hue.toFixed(3)}, ${saturation}%, ${lightness}%)`
 }
 
-function getStreamColor(streamType: string, streamName: string): string {
-  const type = streamType?.toLowerCase() || ''
-  const name = streamName?.toLowerCase() || ''
+function withAlpha(color: string, alpha: number): string {
+  const hslMatch = color.match(/^hsl\(\s*([\d.]+)\s*,\s*([\d.]+)%\s*,\s*([\d.]+)%\s*\)$/i)
+  if (hslMatch) {
+    const h = hslMatch[1]
+    const s = hslMatch[2]
+    const l = hslMatch[3]
+    return `hsla(${h}, ${s}%, ${l}%, ${alpha})`
+  }
 
-  if (STREAM_COLORS[type]) return STREAM_COLORS[type]
+  const hexMatch = color.match(/^#([0-9a-f]{6})$/i)
+  if (hexMatch) {
+    const hex = hexMatch[1]
+    const r = parseInt(hex.slice(0, 2), 16)
+    const g = parseInt(hex.slice(2, 4), 16)
+    const b = parseInt(hex.slice(4, 6), 16)
+    return `rgba(${r}, ${g}, ${b}, ${alpha})`
+  }
 
-  // Infer from name
-  if (name.includes('main') || name.includes('trunk')) return STREAM_COLORS.mainline
-  if (name.includes('dev')) return STREAM_COLORS.development
-  if (name.includes('release') || name.includes('rel')) return STREAM_COLORS.release
-  if (name.includes('feature') || name.includes('feat')) return STREAM_COLORS.feature
-  if (name.includes('hotfix') || name.includes('fix')) return STREAM_COLORS.hotfix
-
-  return STREAM_COLORS.default
+  return color
 }
 
 function formatRelativeDate(dateStr: string | undefined): string {
@@ -166,24 +165,6 @@ interface LaneInfo {
   active: boolean
 }
 
-// Author colors for virtual lanes
-const AUTHOR_COLORS = [
-  '#22c55e', // green
-  '#3b82f6', // blue
-  '#a855f7', // purple
-  '#eab308', // yellow
-  '#ef4444', // red
-  '#06b6d4', // cyan
-  '#f97316', // orange
-  '#ec4899', // pink
-  '#84cc16', // lime
-  '#14b8a6', // teal
-]
-
-function getAuthorColor(authorIndex: number): string {
-  return AUTHOR_COLORS[authorIndex % AUTHOR_COLORS.length]
-}
-
 // Build graph for stream depots (topology-based)
 function buildStreamGraph(
   commits: SubmittedChangelist[],
@@ -233,7 +214,7 @@ function buildStreamGraph(
     streamLanes.set(mainStream, 0)
     laneInfos.push({
       stream: mainStream,
-      color: getStreamColor(info?.type || '', info?.name || mainStream),
+      color: getDistinctColor(0, 24),
       name: info?.name || mainStream.split('/').pop() || 'main',
       active: true
     })
@@ -248,7 +229,7 @@ function buildStreamGraph(
       streamLanes.set(streamPath, nextLane)
       laneInfos.push({
         stream: streamPath,
-        color: getStreamColor(info?.type || '', info?.name || streamPath),
+        color: getDistinctColor(nextLane, 24),
         name: info?.name || streamPath.split('/').pop() || `stream-${nextLane}`,
         active: true
       })
@@ -263,7 +244,7 @@ function buildStreamGraph(
     const streamPath = commit.stream || currentStream || ''
     const lane = streamLanes.get(streamPath) ?? 0
     const streamInfo = streamMap.get(streamPath)
-    const color = getStreamColor(streamInfo?.type || '', streamInfo?.name || streamPath)
+    const color = laneInfos[lane]?.color || getDistinctColor(lane, 24)
 
     const prevCommit = i > 0 ? commits[i - 1] : null
     const nextCommit = i < commits.length - 1 ? commits[i + 1] : null
@@ -332,7 +313,7 @@ function buildVirtualGraph(
         : author
       laneInfos.push({
         stream: author,
-        color: getAuthorColor(i),
+        color: getDistinctColor(i, 186),
         name: displayName,
         active: true
       })
@@ -345,7 +326,7 @@ function buildVirtualGraph(
     authorToLane.set(author, 0)
     laneInfos.push({
       stream: author,
-      color: getAuthorColor(0),
+      color: getDistinctColor(0, 186),
       name: author,
       active: true
     })
@@ -359,7 +340,7 @@ function buildVirtualGraph(
   for (let i = 0; i < commits.length; i++) {
     const commit = commits[i]
     const lane = authorToLane.get(commit.user) ?? 0
-    const color = getAuthorColor(lane)
+    const color = laneInfos[lane]?.color || getDistinctColor(lane, 186)
 
     const prevCommit = i > 0 ? commits[i - 1] : null
     const nextCommit = i < commits.length - 1 ? commits[i + 1] : null
@@ -493,7 +474,7 @@ function GraphCanvas({
           const endY = getY(i - 1) + ROW_HEIGHT / 2
 
           ctx.beginPath()
-          ctx.strokeStyle = color + '50'
+          ctx.strokeStyle = withAlpha(color, 0.32)
           ctx.lineWidth = 2
           ctx.lineCap = 'round'
           ctx.moveTo(x, startY)
@@ -518,7 +499,7 @@ function GraphCanvas({
 
         // Bezier curve from prev node to current
         ctx.beginPath()
-        ctx.strokeStyle = node.color + 'cc'
+        ctx.strokeStyle = withAlpha(node.color, 0.8)
         ctx.lineWidth = 2
         ctx.lineCap = 'round'
 
@@ -539,7 +520,7 @@ function GraphCanvas({
         const nextY = getY(i + 1)
 
         ctx.beginPath()
-        ctx.strokeStyle = nodes[i + 1].color + 'cc'
+        ctx.strokeStyle = withAlpha(nodes[i + 1].color, 0.8)
         ctx.lineWidth = 2
         ctx.lineCap = 'round'
 
@@ -616,7 +597,8 @@ interface DebugInfo {
 export function CommitGraph({
   depotPath,
   onSelectChangelist,
-  selectedChangelist
+  selectedChangelist,
+  refreshToken = 0,
 }: CommitGraphProps) {
   const [commits, setCommits] = useState<SubmittedChangelist[]>([])
   const [streams, setStreams] = useState<StreamInfo[]>([])
@@ -786,13 +768,22 @@ export function CommitGraph({
     if (depotPath) {
       loadData()
     }
-  }, [depotPath, loadData])
+  }, [depotPath, loadData, refreshToken])
 
   // Build graph structure
   const { nodes, lanes, maxLane, isVirtual } = useMemo(
     () => buildGraph(commits, streams, currentStreamPath, isClassicDepot),
     [commits, streams, currentStreamPath, isClassicDepot]
   )
+
+  const userColorMap = useMemo(() => {
+    const uniqueUsers = Array.from(new Set(commits.map(c => c.user).filter(Boolean))).sort((a, b) => a.localeCompare(b))
+    const map = new Map<string, string>()
+    uniqueUsers.forEach((user, index) => {
+      map.set(user, getDistinctColor(index, 312))
+    })
+    return map
+  }, [commits])
 
   const selectedIdx = commits.findIndex(c => c.number === selectedChangelist)
   const totalHeight = commits.length * ROW_HEIGHT
@@ -818,7 +809,7 @@ export function CommitGraph({
             className="text-gray-500 hover:text-gray-300 p-1 disabled:opacity-50"
             title="Refresh"
           >
-            <svg className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
             </svg>
           </button>
@@ -915,9 +906,10 @@ export function CommitGraph({
       {/* Scrollable content */}
       <div ref={scrollRef} className="flex-1 overflow-y-auto">
         {loading ? (
-          <div className="flex flex-col items-center justify-center py-8 text-center">
-            <img src={iconSvg} className="w-8 h-8 mb-2 animate-doom-chit" alt="Loading..." />
-            <div className="text-sm text-gray-500">Loading history...</div>
+          <div className="p-3 space-y-2 animate-pulse">
+            {Array.from({ length: 8 }).map((_, idx) => (
+              <div key={idx} className="h-[52px] rounded border border-p4-border/40 bg-p4-darker/50" />
+            ))}
           </div>
         ) : error ? (
           <div className="p-4 text-sm text-red-400 text-center">
@@ -956,21 +948,21 @@ export function CommitGraph({
                     onClick={() => onSelectChangelist(item.number)}
                     style={{ height: ROW_HEIGHT }}
                     className={`
-                      flex items-center px-3 cursor-pointer border-b border-p4-border/30
+                      flex items-center px-2 cursor-pointer border-b border-p4-border/30
                       transition-colors select-none
                       ${isSelected ? 'bg-p4-blue/20 border-l-2 border-l-p4-blue' : 'hover:bg-gray-800/50'}
                     `}
                   >
                     {/* User Avatar */}
                     <div
-                      className="w-7 h-7 rounded-full flex items-center justify-center text-xs font-medium flex-shrink-0"
-                      style={{ backgroundColor: isVirtual && node ? node.color : getUserColor(item.user) }}
+                    className="w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-medium flex-shrink-0"
+                      style={{ backgroundColor: userColorMap.get(item.user) || node?.color || '#64748b' }}
                       title={item.user}
                     >
                       {getUserInitials(item.user)}
                     </div>
 
-                    <div className="flex-1 min-w-0 ml-2">
+                    <div className="flex-1 min-w-0 ml-1.5">
                       <div className="flex items-center gap-2">
                         <span className="text-sm text-white truncate">
                           {item.description || '(no description)'}
@@ -983,7 +975,7 @@ export function CommitGraph({
                           <span
                             className="px-1.5 py-0.5 rounded text-[10px]"
                             style={{
-                              backgroundColor: node.color + '20',
+                              backgroundColor: withAlpha(node.color, 0.12),
                               color: node.color
                             }}
                           >
@@ -993,7 +985,7 @@ export function CommitGraph({
                       </div>
                     </div>
 
-                    <div className="text-xs text-gray-500 flex-shrink-0 ml-2">
+                    <div className="text-xs text-gray-500 flex-shrink-0 ml-1.5">
                       {formatRelativeDate(item.date)}
                     </div>
                   </div>

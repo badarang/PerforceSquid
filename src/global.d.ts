@@ -69,6 +69,7 @@ interface P4Api {
   }>
   readFile: (filePath: string) => Promise<{ success: boolean; content?: string; message?: string }>
   saveFile: (filePath: string, content: string) => Promise<{ success: boolean; message?: string }>
+  openInRider: (filePath: string) => Promise<{ success: boolean; message?: string }>
   // Stream Graph APIs
   getDepots: () => Promise<P4Depot[]>
   getStreams: (depot?: string) => Promise<P4Stream[]>
@@ -82,16 +83,25 @@ interface P4Api {
 }
 
 interface SettingsApi {
+  getLayoutPresets: () => Promise<Record<string, { main: number[]; detailsLeft: number[]; window: { width: number; height: number }; updatedAt: string }>>
+  setLayoutPresets: (presets: Record<string, { main: number[]; detailsLeft: number[]; window: { width: number; height: number }; updatedAt: string }>) => Promise<{ success: boolean }>
+  getWindowBounds: () => Promise<{ width: number; height: number }>
+  setWindowBounds: (bounds: { width: number; height: number }) => Promise<{ success: boolean }>
   getAutoLaunch: () => Promise<boolean>
   setAutoLaunch: (enabled: boolean) => Promise<{ success: boolean }>
+  getRiderPath: () => Promise<string>
+  setRiderPath: (riderPath: string) => Promise<{ success: boolean; message?: string }>
   getDefaultReviewers: () => Promise<string[]>
   setDefaultReviewers: (reviewers: string[]) => Promise<{ success: boolean }>
   getReviewLink: (changelist: number) => Promise<string | null>
   setReviewLink: (changelist: number, reviewUrl: string) => Promise<{ success: boolean }>
+  getNotes: () => Promise<string>
+  setNotes: (notesText: string) => Promise<{ success: boolean }>
 }
 
 interface DialogApi {
   openDirectory: () => Promise<string | null>
+  openFile: (options?: { filters?: Array<{ name: string; extensions: string[] }> }) => Promise<string | null>
 }
 
 interface JiraStatus {

@@ -1,7 +1,8 @@
-import { useState, useEffect } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import Editor from '@monaco-editor/react'
 import { useP4Store } from '../stores/p4Store'
 import { useToastContext } from '../App'
+import { PerforceDiffView } from './PerforceDiffView'
 
 interface BlameLine {
   lineNumber: number
@@ -9,170 +10,6 @@ interface BlameLine {
   user: string
   date: string
   content: string
-}
-
-interface DiffLine {
-  type: 'add' | 'delete' | 'context' | 'hunk'
-  content: string
-  oldLineNum?: number
-  newLineNum?: number
-}
-
-function parseDiff(diffText: string): DiffLine[] {
-  if (!diffText.trim()) {
-    return []
-  }
-
-  const lines = diffText.split('\n')
-  const result: DiffLine[] = []
-  let oldLineNum = 0
-  let newLineNum = 0
-  const pairedMinus = new Set<number>()
-  const pairedPlus = new Set<number>()
-
-  const comparable = (value: string) => value.replace(/\r$/, '').trimEnd()
-  const braceOnly = (value: string) => /^[\s{}]+\s*$/.test(value)
-  const isEquivalentChangeLine = (left: string, right: string) => {
-    const a = comparable(left)
-    const b = comparable(right)
-    if (a === b) return true
-    if (braceOnly(a) && braceOnly(b) && a.trim() === b.trim()) return true
-    return false
-  }
-  const resetBoundary = (line: string) =>
-    line.startsWith('@@') || line.startsWith('====') || line.startsWith('---') || line.startsWith('+++') || line.startsWith('diff ')
-
-  // Pair brace-only add/delete lines within the same hunk even when they are
-  // not adjacent. This removes common trailing-brace false positives.
-  {
-    const pendingBraceMinus = new Map<string, number[]>()
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i]
-      if (resetBoundary(line)) {
-        pendingBraceMinus.clear()
-        continue
-      }
-      if (line.startsWith('-')) {
-        const raw = line.slice(1)
-        const key = comparable(raw).trim()
-        if (braceOnly(raw) && key) {
-          const list = pendingBraceMinus.get(key) || []
-          list.push(i)
-          pendingBraceMinus.set(key, list)
-        }
-        continue
-      }
-      if (line.startsWith('+')) {
-        const raw = line.slice(1)
-        const key = comparable(raw).trim()
-        if (!braceOnly(raw) || !key) continue
-        const list = pendingBraceMinus.get(key)
-        if (list && list.length > 0) {
-          const minusIndex = list.shift()!
-          pairedMinus.add(minusIndex)
-          pairedPlus.add(i)
-          if (list.length === 0) pendingBraceMinus.delete(key)
-        }
-      }
-    }
-  }
-
-  // Pair equal -/+ lines within a nearby change block so unchanged lines
-  // (reordered by diff alignment) are rendered as context instead of noise.
-  for (let i = 0; i < lines.length; i++) {
-    if (!lines[i].startsWith('-') || lines[i].startsWith('---')) continue
-    const minusContent = comparable(lines[i].slice(1))
-    if (!minusContent) continue
-
-    for (let j = i + 1; j < lines.length && j <= i + 12; j++) {
-      const candidate = lines[j]
-      if (candidate.startsWith('@@') || candidate.startsWith('====') || candidate.startsWith('---') || candidate.startsWith('+++') || candidate.startsWith('diff ')) {
-        break
-      }
-      if (!(candidate.startsWith('+') || candidate.startsWith('-'))) {
-        break
-      }
-      if (candidate.startsWith('+') && !pairedPlus.has(j) && isEquivalentChangeLine(lines[i].slice(1), candidate.slice(1))) {
-        pairedMinus.add(i)
-        pairedPlus.add(j)
-        break
-      }
-    }
-  }
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i]
-    if (line.startsWith('---') || line.startsWith('+++') || line.startsWith('diff ')) {
-      continue
-    }
-
-    if (line.startsWith('@@')) {
-      const match = line.match(/@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@(.*)/)
-      if (match) {
-        oldLineNum = parseInt(match[1], 10)
-        newLineNum = parseInt(match[2], 10)
-        result.push({ type: 'hunk', content: line })
-      }
-      continue
-    }
-
-    if (line.startsWith('-')) {
-      if (pairedMinus.has(i)) {
-        result.push({
-          type: 'context',
-          content: line.slice(1),
-          oldLineNum: oldLineNum++,
-          newLineNum: newLineNum++
-        })
-        continue
-      }
-      if (braceOnly(line.slice(1))) {
-        oldLineNum++
-        continue
-      }
-      result.push({ type: 'delete', content: line.slice(1), oldLineNum: oldLineNum++ })
-      continue
-    }
-
-    if (line.startsWith('+')) {
-      if (pairedPlus.has(i)) {
-        continue
-      }
-      if (braceOnly(line.slice(1))) {
-        newLineNum++
-        continue
-      }
-      result.push({ type: 'add', content: line.slice(1), newLineNum: newLineNum++ })
-    } else if (line.startsWith(' ') || line === '') {
-      result.push({
-        type: 'context',
-        content: line.slice(1) || '',
-        oldLineNum: oldLineNum++,
-        newLineNum: newLineNum++
-      })
-    }
-  }
-
-  return result
-}
-
-// Generate consistent colors for a user (text and background)
-function getUserColors(user: string): { text: string; bg: string } {
-  const colorPairs = [
-    { text: 'rgb(96, 165, 250)', bg: 'rgba(96, 165, 250, 0.08)' },   // blue
-    { text: 'rgb(74, 222, 128)', bg: 'rgba(74, 222, 128, 0.08)' },   // green
-    { text: 'rgb(250, 204, 21)', bg: 'rgba(250, 204, 21, 0.08)' },   // yellow
-    { text: 'rgb(192, 132, 252)', bg: 'rgba(192, 132, 252, 0.08)' }, // purple
-    { text: 'rgb(244, 114, 182)', bg: 'rgba(244, 114, 182, 0.08)' }, // pink
-    { text: 'rgb(34, 211, 238)', bg: 'rgba(34, 211, 238, 0.08)' },   // cyan
-    { text: 'rgb(251, 146, 60)', bg: 'rgba(251, 146, 60, 0.08)' },   // orange
-    { text: 'rgb(45, 212, 191)', bg: 'rgba(45, 212, 191, 0.08)' },   // teal
-  ]
-  let hash = 0
-  for (let i = 0; i < user.length; i++) {
-    hash = user.charCodeAt(i) + ((hash << 5) - hash)
-  }
-  return colorPairs[Math.abs(hash) % colorPairs.length]
 }
 
 function getLanguage(fileName: string) {
@@ -207,6 +44,7 @@ export function DiffViewer({ isStandalone = false, initialMode = 'diff' }: DiffV
   const { selectedFile, currentDiff, isDiffLoading, fetchDiff } = useP4Store()
   const toast = useToastContext()
   const [viewMode, setViewMode] = useState<'diff' | 'blame'>('diff')
+  const [ignoreFormattingNoise, setIgnoreFormattingNoise] = useState(true)
   const [blameData, setBlameData] = useState<BlameLine[]>([])
   const [blameLoading, setBlameLoading] = useState(false)
   const [blameError, setBlameError] = useState<string | null>(null)
@@ -216,6 +54,8 @@ export function DiffViewer({ isStandalone = false, initialMode = 'diff' }: DiffV
   const [editContent, setEditContent] = useState('')
   const [isSaving, setIsSaving] = useState(false)
   const [isEditLoading, setIsEditLoading] = useState(false)
+  const [usePlainTextEditor, setUsePlainTextEditor] = useState(false)
+  const monacoMountedRef = useRef(false)
 
   // Reset when file changes
   useEffect(() => {
@@ -224,6 +64,8 @@ export function DiffViewer({ isStandalone = false, initialMode = 'diff' }: DiffV
     setBlameError(null)
     setIsEditing(false)
     setEditContent('')
+    setUsePlainTextEditor(false)
+    monacoMountedRef.current = false
   }, [selectedFile?.depotFile])
 
   // Handle initial mode (e.g. from DiffWindow)
@@ -232,6 +74,25 @@ export function DiffViewer({ isStandalone = false, initialMode = 'diff' }: DiffV
        handleEditClick()
     }
   }, [initialMode, selectedFile])
+
+  useEffect(() => {
+    if (!isEditing) {
+      setUsePlainTextEditor(false)
+      monacoMountedRef.current = false
+      return
+    }
+
+    setUsePlainTextEditor(false)
+    monacoMountedRef.current = false
+
+    const timeoutId = window.setTimeout(() => {
+      if (!monacoMountedRef.current) {
+        setUsePlainTextEditor(true)
+      }
+    }, 2500)
+
+    return () => window.clearTimeout(timeoutId)
+  }, [isEditing, selectedFile?.depotFile])
 
   // Load blame when switching to blame mode
   useEffect(() => {
@@ -339,6 +200,16 @@ export function DiffViewer({ isStandalone = false, initialMode = 'diff' }: DiffV
     }
   }
 
+  const exitEditMode = () => {
+    setIsEditing(false)
+    setUsePlainTextEditor(false)
+    monacoMountedRef.current = false
+
+    if (selectedFile && !currentDiff && !isDiffLoading) {
+      void fetchDiff(selectedFile)
+    }
+  }
+
   if (!selectedFile) {
     return (
       <div className="h-full flex items-center justify-center text-gray-500">
@@ -350,10 +221,12 @@ export function DiffViewer({ isStandalone = false, initialMode = 'diff' }: DiffV
     )
   }
 
-  if (isDiffLoading || isEditLoading) {
+  if (isEditLoading || (isDiffLoading && !isEditing)) {
     return (
-      <div className="h-full flex items-center justify-center text-gray-500">
-        <div className="animate-pulse">Loading...</div>
+      <div className="h-full p-3 space-y-2 animate-pulse">
+        {Array.from({ length: 12 }).map((_, idx) => (
+          <div key={idx} className="h-5 rounded bg-gray-700/50" />
+        ))}
       </div>
     )
   }
@@ -374,102 +247,14 @@ export function DiffViewer({ isStandalone = false, initialMode = 'diff' }: DiffV
       )
     }
 
-    const diffLines = parseDiff(currentDiff.hunks)
-
-    if (diffLines.length === 0) {
-      return (
-        <div className="h-full flex items-center justify-center text-gray-500">
-          <div className="text-center">
-            <div className="text-xl mb-2">No changes</div>
-            <div className="text-sm">This file has no differences from the depot version</div>
-          </div>
-        </div>
-      )
-    }
-
     return (
-      <div className="diff-view font-mono text-[13px]">
-        {diffLines.map((line, index) => {
-          if (line.type === 'hunk') {
-            return (
-              <div key={index} className="bg-gray-700 text-gray-400 px-4 py-1 text-xs border-y border-gray-600">
-                {line.content}
-              </div>
-            )
-          }
-
-          const lineClass = line.type === 'add' ? 'ghdiff-add' :
-                            line.type === 'delete' ? 'ghdiff-delete' :
-                            'ghdiff-context'
-
-          // Blame Info lookup
-          let blameInfo = null
-          if (viewMode === 'blame' && blameData.length > 0) {
-             // For context and delete, we have an old line number which maps to the depot file
-             if ((line.type === 'context' || line.type === 'delete') && line.oldLineNum) {
-               // oldLineNum is 1-based, blameData is 0-indexed
-               const blame = blameData[line.oldLineNum - 1]
-               if (blame) {
-                 const colors = getUserColors(blame.user)
-                 // Check if previous line had same blame to group visually (optional, simple for now)
-                 blameInfo = (
-                   <div 
-                     className="flex items-center gap-2 px-2 overflow-hidden whitespace-nowrap border-r border-gray-700 select-none opacity-80 hover:opacity-100"
-                     style={{ width: '160px', backgroundColor: colors.bg, color: colors.text }}
-                     title={`CL ${blame.changelist} by ${blame.user} on ${blame.date}`}
-                   >
-                     <span className="font-medium truncate flex-1">{blame.user}</span>
-                     <span className="text-[10px] opacity-70 w-[65px] text-right">{blame.date.split(' ')[0]}</span>
-                   </div>
-                 )
-               }
-             } else if (line.type === 'add') {
-               // For added lines, it's a local change
-               blameInfo = (
-                 <div 
-                   className="flex items-center px-2 border-r border-gray-700 select-none"
-                   style={{ width: '160px', backgroundColor: 'rgba(255,255,255,0.02)' }}
-                 >
-                   <span className="text-gray-500 italic text-xs">You</span>
-                 </div>
-               )
-             } else {
-               // Spacer
-                blameInfo = (
-                 <div 
-                   className="border-r border-gray-700"
-                   style={{ width: '160px', backgroundColor: 'rgba(255,255,255,0.02)' }}
-                 />
-               )
-             }
-          }
-
-          return (
-            <div key={index} className={`diff-line ${lineClass}`}>
-              {/* Blame Gutter */}
-              {viewMode === 'blame' && blameInfo}
-              
-              {/* Line Numbers */}
-              <div className="flex select-none text-[11px] font-mono leading-[20px]">
-                 <div className="gh-num old">
-                   {line.type === 'add' ? '' : line.oldLineNum || ''}
-                 </div>
-                 <div className="gh-num new">
-                   {line.type === 'delete' ? '' : line.newLineNum || ''}
-                 </div>
-              </div>
-
-              {/* Content */}
-              <div className="diff-line-content leading-[20px] whitespace-pre overflow-hidden">
-                <span className="inline-block w-[10px] opacity-50 select-none">
-                  {line.type === 'add' ? '+' : line.type === 'delete' ? '-' : ' '}
-                </span>
-                {line.content}
-              </div>
-            </div>
-          )
-        })}
-      </div>
+      <PerforceDiffView
+        diffText={currentDiff.hunks}
+        fallbackPath={selectedFile.depotFile || currentDiff.filePath}
+        fallbackAction={selectedFile.action}
+        showFileHeaders={false}
+        ignoreFormattingNoise={ignoreFormattingNoise}
+      />
     )
   }
 
@@ -477,6 +262,25 @@ export function DiffViewer({ isStandalone = false, initialMode = 'diff' }: DiffV
   const renderEditor = () => {
     const filePath = selectedFile.clientFile || selectedFile.depotFile
     const language = getLanguage(filePath)
+
+    if (usePlainTextEditor) {
+      return (
+        <div className="w-full h-full bg-[#1e1e1e] flex flex-col">
+          <div className="px-4 py-2 text-xs text-amber-300 border-b border-amber-900/60 bg-amber-950/20">
+            Monaco editor initialization timed out. Using plain text editor for this file.
+          </div>
+          <textarea
+            value={editContent}
+            onChange={(event) => setEditContent(event.target.value)}
+            spellCheck={false}
+            className="flex-1 w-full resize-none border-0 bg-[#1e1e1e] px-4 py-4 text-[13px] leading-6 text-gray-100 outline-none"
+            style={{
+              fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
+            }}
+          />
+        </div>
+      )
+    }
 
     return (
       <div className="w-full h-full bg-[#1e1e1e]">
@@ -487,6 +291,14 @@ export function DiffViewer({ isStandalone = false, initialMode = 'diff' }: DiffV
           theme="vs-dark"
           value={editContent}
           onChange={(value) => setEditContent(value || '')}
+          loading={
+            <div className="h-full flex items-center justify-center text-sm text-gray-400">
+              Loading editor...
+            </div>
+          }
+          onMount={() => {
+            monacoMountedRef.current = true
+          }}
           options={{
             minimap: { enabled: false },
             fontSize: 13,
@@ -521,7 +333,7 @@ export function DiffViewer({ isStandalone = false, initialMode = 'diff' }: DiffV
                 {isSaving ? 'Saving...' : 'Save'}
               </button>
               <button
-                onClick={() => setIsEditing(false)}
+                onClick={exitEditMode}
                 disabled={isSaving}
                 className="px-3 py-1 text-xs font-medium bg-gray-700 text-gray-200 rounded hover:bg-gray-600 disabled:opacity-50"
               >
@@ -540,6 +352,18 @@ export function DiffViewer({ isStandalone = false, initialMode = 'diff' }: DiffV
                   className="rounded border-gray-600 bg-gray-700 text-p4-blue focus:ring-offset-gray-800"
                 />
                 Show Blame
+              </label>
+
+              <div className="w-px h-4 bg-gray-700 mx-2"></div>
+
+              <label className="flex items-center gap-2 text-xs text-gray-300 cursor-pointer select-none hover:text-white">
+                <input
+                  type="checkbox"
+                  checked={ignoreFormattingNoise}
+                  onChange={(e) => setIgnoreFormattingNoise(e.target.checked)}
+                  className="rounded border-gray-600 bg-gray-700 text-p4-blue focus:ring-offset-gray-800"
+                />
+                Ignore formatting noise
               </label>
 
               <div className="w-px h-4 bg-gray-700 mx-2"></div>
@@ -573,11 +397,10 @@ export function DiffViewer({ isStandalone = false, initialMode = 'diff' }: DiffV
              </div>
            </div>
         ) : blameLoading && viewMode === 'blame' && blameData.length === 0 ? (
-           <div className="h-full flex items-center justify-center text-gray-500">
-             <div className="animate-pulse flex flex-col items-center">
-               <span className="mb-2">Loading annotation...</span>
-               <span className="text-xs">Fetching file history from server</span>
-             </div>
+           <div className="h-full p-3 space-y-2 animate-pulse">
+             {Array.from({ length: 10 }).map((_, idx) => (
+               <div key={idx} className="h-5 rounded bg-gray-700/50" />
+             ))}
            </div>
         ) : (
           renderDiffView()

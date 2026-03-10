@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useMemo } from 'react'
-import iconSvg from '../assets/icon.svg'
+import { createPortal } from 'react-dom'
 
 interface Stream {
   stream: string
@@ -37,7 +37,9 @@ export function StreamSelector({ currentStream, onStreamChange }: StreamSelector
   const [error, setError] = useState<string | null>(null)
   const [depot, setDepot] = useState<string | null>(null)
   const [favoriteStreams, setFavoriteStreams] = useState<string[]>([])
-  const dropdownRef = useRef<HTMLDivElement>(null)
+  const rootRef = useRef<HTMLDivElement>(null)
+  const menuRef = useRef<HTMLDivElement>(null)
+  const [menuPosition, setMenuPosition] = useState<{ top: number; left: number }>({ top: 0, left: 0 })
 
   // Extract current stream name for display
   const currentStreamName = currentStream
@@ -70,13 +72,39 @@ export function StreamSelector({ currentStream, onStreamChange }: StreamSelector
   // Close dropdown on outside click
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
-      if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
+      const target = e.target as Node
+      const insideRoot = !!rootRef.current?.contains(target)
+      const insideMenu = !!menuRef.current?.contains(target)
+      if (!insideRoot && !insideMenu) {
         setIsOpen(false)
       }
     }
     document.addEventListener('mousedown', handleClickOutside)
     return () => document.removeEventListener('mousedown', handleClickOutside)
   }, [])
+
+  useEffect(() => {
+    if (!isOpen) return
+
+    const updatePosition = () => {
+      const rect = rootRef.current?.getBoundingClientRect()
+      if (!rect) return
+      const desiredLeft = rect.left
+      const maxLeft = Math.max(8, window.innerWidth - 320 - 8)
+      setMenuPosition({
+        top: rect.bottom + 4,
+        left: Math.min(desiredLeft, maxLeft),
+      })
+    }
+
+    updatePosition()
+    window.addEventListener('resize', updatePosition)
+    window.addEventListener('scroll', updatePosition, true)
+    return () => {
+      window.removeEventListener('resize', updatePosition)
+      window.removeEventListener('scroll', updatePosition, true)
+    }
+  }, [isOpen])
 
   const loadStreams = async () => {
     setLoading(true)
@@ -206,7 +234,7 @@ export function StreamSelector({ currentStream, onStreamChange }: StreamSelector
   }
 
   return (
-    <div className="relative" ref={dropdownRef}>
+    <div className="relative" ref={rootRef}>
       <button
         onClick={() => setIsOpen(!isOpen)}
         className="flex items-center gap-2 px-3 py-1.5 rounded bg-gray-700 hover:bg-gray-600 transition-colors text-sm text-white"
@@ -216,23 +244,34 @@ export function StreamSelector({ currentStream, onStreamChange }: StreamSelector
         <svg className={`w-4 h-4 transition-transform ${isOpen ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>
       </button>
 
-      {isOpen && (
-        <div className="absolute top-full left-0 mt-1 w-80 bg-p4-darker border border-p4-border rounded-lg shadow-xl z-50 overflow-hidden">
+      {isOpen && createPortal(
+        <div
+          ref={menuRef}
+          className="fixed w-80 bg-p4-darker border border-p4-border rounded-lg shadow-xl z-[200] overflow-hidden"
+          style={{ top: menuPosition.top, left: menuPosition.left }}
+        >
           <div className="px-3 py-2 border-b border-p4-border bg-gray-800/50">
             <div className="flex items-center justify-between">
               <span className="text-xs text-gray-400">{depot ? `//${depot}` : 'Streams'}</span>
-              <button onClick={loadStreams} disabled={loading} className="text-xs text-gray-500 hover:text-gray-300">{loading ? 'Loading...' : 'Refresh'}</button>
+              <button onClick={loadStreams} disabled={loading} className="text-xs text-gray-500 hover:text-gray-300">
+                {loading ? <span className="inline-block h-3 w-12 rounded bg-gray-600/60 animate-pulse" /> : 'Refresh'}
+              </button>
             </div>
           </div>
 
           {error && <div className="px-3 py-2 text-xs text-red-400 bg-red-500/10">{error}</div>}
-          {switching && <div className="px-3 py-2 text-xs text-yellow-400 bg-yellow-500/10 flex items-center gap-2"><div className="w-3 h-3 border-2 border-yellow-400 border-t-transparent rounded-full animate-spin" />Switching stream...</div>}
+          {switching && (
+            <div className="px-3 py-2 bg-yellow-500/10">
+              <div className="h-3 w-32 rounded bg-yellow-400/30 animate-pulse" />
+            </div>
+          )}
 
           <div className="max-h-80 overflow-y-auto">
             {loading ? (
-            <div className="text-center py-4">
-              <img src={iconSvg} className="w-8 h-8 mx-auto mb-2 animate-doom-chit" alt="Loading..." />
-              <div className="text-gray-400">Loading streams...</div>
+            <div className="p-3 space-y-2 animate-pulse">
+              {Array.from({ length: 6 }).map((_, idx) => (
+                <div key={idx} className="h-8 rounded bg-gray-700/50" />
+              ))}
             </div>
             ) : streams.length === 0 ? (
               <div className="px-3 py-4 text-sm text-gray-500 text-center">No streams found<div className="text-xs mt-1">(Classic depot?)</div></div>
@@ -271,7 +310,8 @@ export function StreamSelector({ currentStream, onStreamChange }: StreamSelector
               ))}
             </div>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
     </div>
   )
